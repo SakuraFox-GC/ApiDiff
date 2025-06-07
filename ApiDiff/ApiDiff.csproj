@@ -1,0 +1,32 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <EnablePreviewFeatures>true</EnablePreviewFeatures>
+    <LangVersion>preview</LangVersion>
+    <IsAotCompatible>true</IsAotCompatible>
+    <PublishAot>true</PublishAot>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="CppAst" Version="0.23.1" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <!-- Workaround for issue https://github.com/microsoft/ClangSharp/issues/129 -->
+    <RuntimeIdentifier Condition="'$(RuntimeIdentifier)' == '' AND '$(PackAsTool)' != 'true'">$(NETCoreSdkRuntimeIdentifier)</RuntimeIdentifier>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <DirectPInvoke Include="ntdll" />
+    <!--<DirectPInvoke Include="Kernel32" />-->
+    <DirectPInvoke Include="User32" />
+    <DirectPInvoke Include="Advapi32" />
+    <DirectPInvoke Include="ClangSharp" />
+    <NativeLibrary Include="$(ProjectDir)lib\x64\ClangSharp.lib" Condition="$(RuntimeIdentifier.StartsWith('win-x64'))" />
+  </ItemGroup>
+
+</Project>
