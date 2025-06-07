@@ -1,0 +1,4 @@
+[submodule "deps/ClangSharp"]
+	path = deps/ClangSharp
+	url = https://github.com/ksharperd/ClangSharp.git
+	branch = v18_aot
