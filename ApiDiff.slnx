@@ -1,0 +1,5 @@
+<Solution>
+  <Project Path="ApiDiff/ApiDiff.csproj" />
+  <Project Path="deps/ClangSharp/sources/ClangSharp/ClangSharp.csproj" />
+  <Project Path="deps/ClangSharp/sources/ClangSharp.Interop/ClangSharp.Interop.csproj" />
+</Solution>
