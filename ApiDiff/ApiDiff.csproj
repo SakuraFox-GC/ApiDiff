@@ -22,13 +22,20 @@
 
   <ItemGroup>
     <DirectPInvoke Include="ntdll" />
-    <!--<DirectPInvoke Include="Kernel32" />-->
+    <DirectPInvoke Include="Kernel32" />
     <DirectPInvoke Include="User32" />
     <DirectPInvoke Include="Advapi32" />
     <DirectPInvoke Include="libclang" />
     <DirectPInvoke Include="libClangSharp" />
     <NativeLibrary Include="$(ProjectDir)lib\x64\libclang.lib" Condition="$(RuntimeIdentifier.StartsWith('win-x64'))" />
     <NativeLibrary Include="$(ProjectDir)lib\x64\libClangSharp.lib" Condition="$(RuntimeIdentifier.StartsWith('win-x64'))" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <LinkerArg Include="/opt:ref /opt:icf" />
+    <LinkerArg Include="/emittoolversioninfo:no" />
+	<LinkerArg Include="/emitpogophaseinfo" Condition="$(Configuration) == 'Release'" />
+    <LinkerArg Include="/pdbaltpath:%_PDB%" />
   </ItemGroup>
 
 </Project>

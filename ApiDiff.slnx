@@ -1,4 +1,6 @@
 <Solution>
   <Project Path="ApiDiff/ApiDiff.csproj" />
   <Project Path="deps/CppAst.NET/src/CppAst/CppAst.csproj" />
+  <Project Path="deps/CppAst.NET/deps/ClangSharp/sources/ClangSharp/ClangSharp.csproj" />
+  <Project Path="deps/CppAst.NET/deps/ClangSharp/sources/ClangSharp.Interop/ClangSharp.Interop.csproj" />
 </Solution>
