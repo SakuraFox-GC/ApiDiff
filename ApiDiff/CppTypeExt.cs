@@ -1,4 +1,5 @@
-﻿using System.Diagnostics.CodeAnalysis;
+﻿using System.Buffers;
+using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 
@@ -9,41 +10,59 @@ namespace ApiDiff;
 internal static class CppTypeExt
 {
 
-    extension<T>(T declaration) where T : CppTypeDeclaration
+    private static readonly SearchValues<string> KnownTypes = SearchValues.Create(["Il2CppClass", "Il2CppClass_0", "Il2CppClass_1", "Il2CppRGCTXData", "MonitorData", "Il2CppObject", "Il2CppArray", "Il2CppArrayBounds", "VirtualInvokeData", "Action", "String", "Vector2", "Vector3", "void"], StringComparison.Ordinal);
+
+    private static bool CompareTypeName(string left, string right)
+    {
+        left = left.Replace("__Enum", string.Empty);
+        right = right.Replace("__Enum", string.Empty);
+
+        bool leftUnderscore = left.Contains('_'), rightUnderscore = right.Contains('_');
+        if (leftUnderscore && !rightUnderscore)
+            return left[(left.LastIndexOf('_') + 1)..] == right;
+
+        if (rightUnderscore && !leftUnderscore)
+            return right[(right.LastIndexOf('_') + 1)..] == left;
+
+        return left == right;
+    }
+
+    extension(CppType type)
     {
 
-        public bool IsSameDeclaration(string anotherTypeName)
+        public bool IsKnownType => KnownTypes.Contains(type.TypeName);
+
+        public bool IsPointerType => type.TypeKind is CppTypeKind.Pointer;
+
+        public bool IsPrimitiveType => type.TypeKind is CppTypeKind.Primitive;
+
+        public bool IsTypeDef => type.TypeKind is CppTypeKind.Typedef;
+
+        public bool HasElementType => type is CppTypeWithElementType;
+
+        public string TypeName => type is CppTypeWithElementType eType ? eType.ElementType.FullName : type.FullName;
+
+        public bool IsSameType(string anotherTypeName)
         {
-            string leftName = declaration.FullName, rightName = anotherTypeName;
-            if (declaration.Parent is CppNamespace { } @namespace)
+            string leftName = type.FullName, rightName = anotherTypeName;
+            if (type.Parent is CppNamespace { } @namespace)
             {
                 leftName = leftName.Replace($"{@namespace.Name}::", string.Empty);
             }
 
-            if (declaration.TypeKind == CppTypeKind.Enum)
-                leftName = leftName.Replace("__Enum", string.Empty);
-            rightName = rightName.Replace("__Enum", string.Empty);
-
-            bool leftUnderscore = leftName.Contains('_'), rightUnderscore = rightName.Contains('_');
-            if (leftUnderscore && !rightUnderscore)
-                return leftName[(leftName.LastIndexOf('_') + 1)..] == rightName;
-
-            if (rightUnderscore && !leftUnderscore)
-                return rightName[(rightName.LastIndexOf('_') + 1)..] == leftName;
-
-            return leftName == rightName;
+            return CompareTypeName(leftName, rightName);
         }
 
-        public bool IsSameDeclaration(T anotherDeclaration)
+        public bool IsSameType(CppType anotherType)
         {
-            if (declaration.TypeKind != anotherDeclaration.TypeKind)
+            if (type.TypeKind != anotherType.TypeKind)
                 return false;
 
-            var rightName = anotherDeclaration.FullName;
-            if (anotherDeclaration.Parent is CppNamespace { } anotherNamespace)
+            var rightName = anotherType.FullName;
+            if (anotherType.Parent is CppNamespace { } anotherNamespace)
                 rightName = rightName.Replace($"{anotherNamespace.Name}::", string.Empty);
 
-            return declaration.IsSameDeclaration(rightName);
+            return type.IsSameType(rightName);
         }
 
     }
@@ -56,16 +75,16 @@ internal static class CppTypeExt
             if (declarations is not List<CppTypeDeclaration> cppTypeDeclarations)
                 throw new NotSupportedException();
 
-            var target = cppTypeDeclarations.Find(declaration => declaration.IsSameDeclaration(typeName));
+            var target = cppTypeDeclarations.Find(declaration => declaration.IsSameType(typeName));
             return target is not null && declarations.ContainsType(target);
         }
 
-        public bool ContainsType(CppTypeDeclaration cppType)
+        public bool ContainsType(CppType cppType)
         {
             if (declarations is not List<CppTypeDeclaration> cppTypeDeclarations)
                 throw new NotSupportedException();
 
-            return cppTypeDeclarations.Find(declaration => declaration.IsSameDeclaration(cppType)) is not null;
+            return cppTypeDeclarations.Find(declaration => declaration.IsSameType(cppType)) is not null;
         }
 
         public ref CppTypeDeclaration TryFindType(string typeName)
@@ -77,7 +96,7 @@ internal static class CppTypeExt
             for (int i = rawData.Length - 1; i >= 0; --i)
             {
                 ref var target = ref rawData[i];
-                if (target.IsSameDeclaration(typeName))
+                if (target.IsSameType(typeName))
                     return ref target!;
             }
 
@@ -90,7 +109,7 @@ internal static class CppTypeExt
                 throw new NotSupportedException();
 
             var rawData = CollectionsMarshal.AsSpan(cppTypeDeclarations);
-            var index = rawData.IndexOf([cppType], new CppTypeDeclarationComparer());
+            var index = rawData.IndexOf([cppType], new CppTypeComparer());
             if (index == -1)
                 return ref Unsafe.NullRef<CppTypeDeclaration>();
 
@@ -123,17 +142,17 @@ internal static class CppTypeExt
         }
     }
 
-    private class CppTypeDeclarationComparer : IEqualityComparer<CppTypeDeclaration>
+    private class CppTypeComparer : IEqualityComparer<CppType>
     {
-        public bool Equals(CppTypeDeclaration? x, CppTypeDeclaration? y)
+        public bool Equals(CppType? x, CppType? y)
         {
             if (x == null || y == null)
                 throw new InvalidOperationException();
 
-            return x.IsSameDeclaration(y);
+            return x.IsSameType(y);
         }
 
-        public int GetHashCode([DisallowNull] CppTypeDeclaration obj)
+        public int GetHashCode([DisallowNull] CppType obj)
         {
             return obj.GetHashCode();
         }
