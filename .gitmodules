@@ -1,4 +1,4 @@
-[submodule "deps/ClangSharp"]
-	path = deps/ClangSharp
-	url = https://github.com/ksharperd/ClangSharp.git
-	branch = v18_aot
+[submodule "deps/CppAst.NET"]
+	path = deps/CppAst.NET
+	url = https://github.com/ksharperd/CppAst.NET.git
+	branch = main
