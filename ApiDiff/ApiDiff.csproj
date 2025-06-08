@@ -42,7 +42,7 @@
   <ItemGroup>
     <LinkerArg Include="/opt:ref /opt:icf" />
     <LinkerArg Include="/emittoolversioninfo:no" />
-	<LinkerArg Include="/emitpogophaseinfo" Condition="$(Configuration) == 'Release'" />
+    <LinkerArg Include="/emitpogophaseinfo" Condition="$(Configuration) == 'Release'" />
     <LinkerArg Include="/pdbaltpath:%_PDB%" />
   </ItemGroup>
 
