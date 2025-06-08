@@ -28,7 +28,7 @@ internal class Differ
         cppParserOptions.SystemIncludeFolders.Add(sysRootInclude.FullName);
 
         _inputCompilation = TryParseHeader(File.ReadAllText(inputHeader), "input", cppParserOptions);
-        var targetFileContent = File.ReadAllText(includeDir);
+        var targetFileContent = File.ReadAllText(targetHeader);
         _targetCompilation = TryParseHeader(targetFileContent.Replace("#pragma once", $"#pragma once\ntypedef unsigned long size_t;"), "target", cppParserOptions);
 
         var appNamespace = _targetCompilation.Namespaces.FirstOrDefault(@namespace => @namespace.Name == "app");
