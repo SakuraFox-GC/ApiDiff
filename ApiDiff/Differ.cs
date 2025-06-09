@@ -43,6 +43,7 @@ internal class Differ
         LoadPrebuiltType("Il2CppObject");
         LoadPrebuiltType("Il2CppArray");
         LoadPrebuiltType("int32_t", false);
+        LoadPrebuiltType("Action");
     }
 
     public string Generate()
@@ -70,35 +71,30 @@ internal class Differ
 
         foreach (ref var targetType in rawData)
         {
-            ref var insertionList = ref CollectionsMarshal.GetValueRefOrAddDefault(_insertionMap, targetType, out var exists);
-            if (exists)
+            ref var insertionList = ref CollectionsMarshal.GetValueRefOrNullRef(_insertionMap, targetType);
+            if (Unsafe.IsNullRef(ref insertionList))
+                continue;
+
+            var removalList = new List<CppType>();
+            foreach (var typeToInsert in insertionList!)
             {
-                var removalList = new List<CppType>();
-                foreach (var typeToInsert in insertionList!)
+                if (_insertedTypes.Any(insertedType => insertedType.IsSameType(typeToInsert)))
                 {
-                    if (_insertedTypes.Any(insertedType => insertedType.IsSameType(typeToInsert)))
-                    {
-                        removalList.Add(typeToInsert);
-                        continue;
-                    }
-
-                    _insertedTypes.Add(typeToInsert);
+                    removalList.Add(typeToInsert);
+                    continue;
                 }
 
-                foreach (var typeToRemove in removalList)
-                {
-                    insertionList.Remove(typeToRemove);
-                }
+                _insertedTypes.Add(typeToInsert);
+            }
+
+            foreach (var typeToRemove in removalList)
+            {
+                insertionList.Remove(typeToRemove);
             }
         }
 
         StringBuilder headerBuilder = new();
         headerBuilder.AppendLine(CONST_HEADER);
-        headerBuilder.AppendLine();
-        foreach (var include in _targetCompilation.InclusionDirectives)
-        {
-            headerBuilder.AppendLine(include.ToString());
-        }
         headerBuilder.AppendLine();
         foreach (var typeDef in _targetCompilation.Typedefs)
         {
@@ -126,10 +122,10 @@ internal class Differ
             if (data is not CppClass { } @class)
                 continue;
 
-            ref var insertionList = ref CollectionsMarshal.GetValueRefOrAddDefault(_insertionMap, data, out var exists);
-            if (exists)
+            ref var insertionList = ref CollectionsMarshal.GetValueRefOrNullRef(_insertionMap, data);
+            if (!Unsafe.IsNullRef(ref insertionList))
             {
-                foreach (var insertedType in insertionList!)
+                foreach (var insertedType in insertionList)
                 {
                     headerBuilder.AppendLine(insertedType.ToString());
                     headerBuilder.AppendLine();
@@ -177,7 +173,7 @@ internal class Differ
         return requiredType;
     }
 
-    private bool TryWalkClassFields(CppClass targetClass)
+    private unsafe bool TryWalkClassFields(CppClass targetClass)
     {
         ref CppTypeDeclaration inputType = ref _inputDeclarations.TryFindType(targetClass);
         if (Unsafe.IsNullRef(ref inputType))
@@ -186,19 +182,33 @@ internal class Differ
         if (inputType is not CppClass { } inputClass)
             throw new InvalidOperationException("input declaration is not a class");
 
-        CppContainerList<CppField> targetContainer = targetClass.Fields, inputContainer = inputClass.Fields;
+        if (targetClass.SizeOf == 0)
+            return true;
+
+        using var pinnedGCHandleForTargetContainer = new PinnedGCHandle<CppContainerList<CppField>>(targetClass.Fields);
+        ref var targetFields = ref Unsafe.AsRef<List<CppField>>(pinnedGCHandleForTargetContainer.GetAddressOfObjectData());
+        CppContainerList<CppField> inputContainer = inputClass.Fields;
         List<CppField> rebuiltFields = [];
-        if (inputContainer.Count == targetContainer.Count)
+        if (inputContainer.Count == targetFields.Count)
         {
             goto COMPARE_SAME_LENGTH;
         }
 
-        var lastFieldInTarget = targetContainer[^1];
+        var lastFieldInTarget = targetFields[^1];
+        var targetBaseFields = new List<CppField>();
+        foreach (var targetBaseType in targetClass.BaseTypes)
+        {
+            targetBaseFields.AddRange(((CppClass)targetBaseType.Type).Fields);
+        }
         foreach (CppField inputField in inputContainer)
         {
-            if (targetContainer.FirstOrDefault(targetField => targetField.Name == inputField.Name) is CppField { } matchedField)
+            if (targetBaseFields.Find(targetBaseField => targetBaseField.Name == inputField.Name) is CppField { })
+                continue;
+
+            if (targetFields.Find(targetField => targetField.Name == inputField.Name) is CppField { } matchedField)
             {
-                inputField.Type = matchedField.Type;
+                if (inputField.Type.TypeKind == matchedField.Type.TypeKind)
+                    inputField.Type = matchedField.Type;
                 rebuiltFields.Add(inputField);
 
                 if (lastFieldInTarget.Name == inputField.Name)
@@ -218,7 +228,7 @@ internal class Differ
     COMPARE_SAME_LENGTH:
         for (int i = 0; i < inputContainer.Count; i++)
         {
-            CppField inputField = inputContainer[i], targetField = targetContainer[i];
+            CppField inputField = inputContainer[i], targetField = targetFields[i];
             CppType inputFieldType = inputField.Type, targetFieldType = targetField.Type;
             if (inputFieldType.IsKnownType && targetFieldType.IsKnownType)
             {
@@ -249,8 +259,7 @@ internal class Differ
             rebuiltFields.Add(inputField);
         }
     MODIFY_AND_RETURN:
-        targetContainer.Clear();
-        targetContainer.AddRange(rebuiltFields);
+        targetFields = rebuiltFields;
         return true;
     }
 
@@ -272,6 +281,9 @@ internal class Differ
 
     private bool TryAddType(CppTypeDeclaration @base, CppType type)
     {
+        if (type.IsKnownType || type.IsPrimitiveType || type.IsTypeDef || type.TypeName.EndsWith("__Class"))
+            return true;    // pretend that we just insert these types.
+
         ref var types = ref CollectionsMarshal.GetValueRefOrAddDefault(_insertionMap, @base, out var exists);
         if (!exists)
             types = [];
@@ -289,12 +301,35 @@ internal class Differ
         if (type.IsKnownType || type.IsPrimitiveType || type.IsTypeDef)
             return true;
 
+        var typeName = type.TypeName;
+        var isGeneric = type.IsGenericType;
+        if (typeName.EndsWith("__Class"))
+        {
+            Log.Debug($"{type.TypeName} => Il2CppClass");
+            type = _prebuiltTypes["Il2CppClass*"];
+            return true;
+        }
+        else if (!isGeneric && typeName.EndsWith("__Array"))
+        {
+            Log.Debug($"{type.TypeName} => Il2CppArray");
+            type = _prebuiltTypes["Il2CppArray*"];
+            return true;
+        }
+        else if (isGeneric && (typeName.StartsWith("Action_") || typeName.StartsWith("Func_")))
+        {
+            Log.Debug($"{type.TypeName} => Action");
+            type = _prebuiltTypes["Action*"];
+            return true;
+        }
+
         if (type.HasElementType)
         {
             var eType = ((CppTypeWithElementType)type).ElementType;
             return TryWalkTypeHierarchy(ref eType);
         }
-        else if (type is CppClass cppClass)
+
+        _walkedClasses.Add(type.TypeName);
+        if (type is CppClass cppClass)
         {
             foreach (var field in cppClass.Fields)
             {
@@ -307,12 +342,14 @@ internal class Differ
                     continue;
                 }
 
-                var typeName = fieldType.TypeName;
+                typeName = fieldType.TypeName;
+                isGeneric = fieldType.IsGenericType;
                 ref CppTypeDeclaration resolvedTargetType = ref _targetDeclarations.TryFindType(typeName);
                 bool resolvedInMap = false;
                 foreach (var (_, insertionList) in _insertionMap)
                 {
-                    if (insertionList.TryFindType(typeName) is not null)
+                    ref var insertedMatched = ref insertionList.TryFindType(typeName);
+                    if (!Unsafe.IsNullRef(ref insertedMatched))
                     {
                         resolvedInMap = true;
                         break;
@@ -320,18 +357,26 @@ internal class Differ
                 }
                 if (Unsafe.IsNullRef(ref resolvedTargetType) && !resolvedInMap)
                 {
+                    var previousType = field.Type;
                     if (typeName.EndsWith("__Class"))
                     {
                         field.Type = _prebuiltTypes["Il2CppClass*"];
                     }
-                    else if (typeName.EndsWith("__Array"))
+                    else if (!isGeneric && typeName.EndsWith("__Array"))
                     {
                         field.Type = _prebuiltTypes["Il2CppArray*"];
                     }
-                    else if (typeName != "void")
+                    else if (!CppTypeExt.KnownTypes.Contains(typeName))
                     {
                         field.Type = _prebuiltTypes["Il2CppObject*"];
                     }
+                    else if (isGeneric && (typeName.StartsWith("Action_") || typeName.StartsWith("Func_")))
+                    {
+                        field.Type = _prebuiltTypes["Action*"];
+                    }
+
+                    if (!previousType.IsSameType(field.Type))
+                        Log.Debug($"{typeName} => {field.Type.TypeName}");
                 }
             }
         }
@@ -374,6 +419,9 @@ struct E_NAME ## __Array *_items; \
 int32_t _size; \
 int32_t _version; \
 };
-#endif";
+#endif
+
+#include <cstdint>
+#include ""il2cpp-class.h""";
 
 }

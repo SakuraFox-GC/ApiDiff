@@ -10,7 +10,7 @@ namespace ApiDiff;
 internal static class CppTypeExt
 {
 
-    private static readonly SearchValues<string> KnownTypes = SearchValues.Create(["Il2CppClass", "Il2CppClass_0", "Il2CppClass_1", "Il2CppRGCTXData", "MonitorData", "Il2CppObject", "Il2CppArray", "Il2CppArrayBounds", "VirtualInvokeData", "Action", "String", "Vector2", "Vector3", "void"], StringComparison.Ordinal);
+    internal static readonly SearchValues<string> KnownTypes = SearchValues.Create(["Il2CppClass", "Il2CppClass_0", "Il2CppClass_1", "Il2CppRGCTXData", "MonitorData", "Il2CppObject", "Il2CppArray", "Il2CppArrayBounds", "VirtualInvokeData", "Action", "String", "Vector2", "Vector3", "void"], StringComparison.Ordinal);
 
     private static bool CompareTypeName(string left, string right)
     {
@@ -27,6 +27,19 @@ internal static class CppTypeExt
         return left == right;
     }
 
+    private static bool CheckGeneric(string typeName)
+    {
+        var indexOfUnderscore = typeName.IndexOf('_');
+        if (indexOfUnderscore == -1)
+            return false;
+
+        var subName = typeName[(indexOfUnderscore + 1)..];
+        if (subName.IsWhiteSpace())
+            return false;
+
+        return char.IsNumber(subName[0]);
+    }
+
     extension(CppType type)
     {
 
@@ -37,6 +50,8 @@ internal static class CppTypeExt
         public bool IsPrimitiveType => type.TypeKind is CppTypeKind.Primitive;
 
         public bool IsTypeDef => type.TypeKind is CppTypeKind.Typedef;
+
+        public bool IsGenericType => CheckGeneric(type.TypeName);
 
         public bool HasElementType => type is CppTypeWithElementType;
 
@@ -55,6 +70,9 @@ internal static class CppTypeExt
 
         public bool IsSameType(CppType anotherType)
         {
+            if (object.ReferenceEquals(type, anotherType))
+                return true;
+
             if (type.TypeKind != anotherType.TypeKind)
                 return false;
 
@@ -67,32 +85,23 @@ internal static class CppTypeExt
 
     }
 
-    extension<T>(List<T> declarations) where T : CppElement
+    extension<T>(List<T> declarations) where T : CppType
     {
 
         public bool ContainsType(string typeName)
         {
-            if (declarations is not List<CppTypeDeclaration> cppTypeDeclarations)
-                throw new NotSupportedException();
-
-            var target = cppTypeDeclarations.Find(declaration => declaration.IsSameType(typeName));
+            var target = declarations.Find(declaration => declaration.IsSameType(typeName));
             return target is not null && declarations.ContainsType(target);
         }
 
         public bool ContainsType(CppType cppType)
         {
-            if (declarations is not List<CppTypeDeclaration> cppTypeDeclarations)
-                throw new NotSupportedException();
-
-            return cppTypeDeclarations.Find(declaration => declaration.IsSameType(cppType)) is not null;
+            return declarations.Find(declaration => declaration.IsSameType(cppType)) is not null;
         }
 
-        public ref CppTypeDeclaration TryFindType(string typeName)
+        public ref T TryFindType(string typeName)
         {
-            if (declarations is not List<CppTypeDeclaration> cppTypeDeclarations)
-                throw new NotSupportedException();
-
-            var rawData = CollectionsMarshal.AsSpan(cppTypeDeclarations);
+            var rawData = CollectionsMarshal.AsSpan(declarations);
             for (int i = rawData.Length - 1; i >= 0; --i)
             {
                 ref var target = ref rawData[i];
@@ -100,18 +109,15 @@ internal static class CppTypeExt
                     return ref target!;
             }
 
-            return ref Unsafe.NullRef<CppTypeDeclaration>();
+            return ref Unsafe.NullRef<T>();
         }
 
-        public ref CppTypeDeclaration TryFindType(CppTypeDeclaration cppType)
+        public ref T TryFindType(CppType cppType)
         {
-            if (declarations is not List<CppTypeDeclaration> cppTypeDeclarations)
-                throw new NotSupportedException();
-
-            var rawData = CollectionsMarshal.AsSpan(cppTypeDeclarations);
+            var rawData = CollectionsMarshal.AsSpan(declarations);
             var index = rawData.IndexOf([cppType], new CppTypeComparer());
             if (index == -1)
-                return ref Unsafe.NullRef<CppTypeDeclaration>();
+                return ref Unsafe.NullRef<T>();
 
 
             return ref rawData[index];
