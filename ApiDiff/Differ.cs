@@ -309,7 +309,7 @@ internal class Differ
             type = _prebuiltTypes["Il2CppClass*"];
             return true;
         }
-        else if (!isGeneric && typeName.EndsWith("__Array"))
+        else if (typeName.EndsWith("__Array"))
         {
             Log.Debug($"{type.TypeName} => Il2CppArray");
             type = _prebuiltTypes["Il2CppArray*"];
@@ -362,7 +362,7 @@ internal class Differ
                     {
                         field.Type = _prebuiltTypes["Il2CppClass*"];
                     }
-                    else if (!isGeneric && typeName.EndsWith("__Array"))
+                    else if (typeName.EndsWith("__Array"))
                     {
                         field.Type = _prebuiltTypes["Il2CppArray*"];
                     }

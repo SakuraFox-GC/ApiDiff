@@ -25,6 +25,8 @@ namespace ApiDiff
 
             var headerDiffer = new Differ(inputHeader, targetHeader, includeDir);
             Log.Info($"\n{headerDiffer.Generate()}");
+
+            Console.ReadKey(true);
         }
 
         private static void PrintHelp()
@@ -55,6 +57,7 @@ Notes:
             else
             {
                 Log.Error("This programme has been proper baffled.", (Exception)e.ExceptionObject, "WatchDog");
+                Thread.Sleep(10000);
             }
         }
 
