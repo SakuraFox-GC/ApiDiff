@@ -14,7 +14,7 @@ internal class Differ
 
     private readonly List<CppTypeDeclaration> _inputDeclarations = [], _targetDeclarations = [];
     private readonly Dictionary<string, CppType> _prebuiltTypes = [];
-    private readonly HashSet<string> _walkedClasses = [];
+    private readonly HashSet<string> _targetIncludes = [], _walkedClasses = [];
     private readonly List<CppType> _insertedTypes = [];
     private readonly Dictionary<CppTypeDeclaration, List<CppType>> _insertionMap = [];
     private readonly CppCompilation _inputCompilation, _targetCompilation;
@@ -32,6 +32,7 @@ internal class Differ
         var targetFileContent = File.ReadAllText(targetHeader);
         _targetCompilation = TryParseHeader(targetFileContent.Replace("#pragma once", $"#pragma once\ntypedef unsigned long size_t;"), "target", cppParserOptions);
 
+        _targetIncludes = [.. _targetCompilation.InclusionDirectives.Select(targetInclude => { return targetInclude.FileName; })];
         var appNamespace = _targetCompilation.Namespaces.FirstOrDefault(@namespace => @namespace.Name == "app");
         ArgumentNullException.ThrowIfNull(appNamespace);
 
@@ -97,12 +98,12 @@ internal class Differ
         StringBuilder headerBuilder = new();
         headerBuilder.AppendLine(CONST_HEADER);
         headerBuilder.AppendLine();
-        foreach (var typeDef in _targetCompilation.Typedefs)
+        foreach (var typeDef in _targetCompilation.Typedefs.Where(def => !_targetIncludes.Contains(def.SourceFile) && def.Name != "size_t"))
         {
             headerBuilder.AppendLine(typeDef.FullName);
         }
         headerBuilder.AppendLine();
-        foreach (var type in _targetCompilation.Classes)
+        foreach (var type in _targetCompilation.Classes.Where(@class => !_targetIncludes.Contains(@class.SourceFile)))
         {
             headerBuilder.AppendLine(type.ToString());
         }
