@@ -1,4 +1,5 @@
-﻿using System.Runtime.CompilerServices;
+﻿using System.Diagnostics;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
 
@@ -42,7 +43,7 @@ internal class Differ
         LoadPrebuiltType("Il2CppClass");
         LoadPrebuiltType("Il2CppObject");
         LoadPrebuiltType("Il2CppArray");
-        LoadPrebuiltType("int32_t", false);
+        LoadPrebuiltType("int32_t");
         LoadPrebuiltType("Action");
     }
 
@@ -161,7 +162,7 @@ internal class Differ
         return compilation;
     }
 
-    private CppTypeDeclaration LoadPrebuiltType(string typeName, bool loadPointer = true)
+    private CppTypeDeclaration LoadPrebuiltType(string typeName, bool loadPointer = false)
     {
         ref var requiredType = ref _inputDeclarations.TryFindType(typeName);
         if (Unsafe.IsNullRef(ref requiredType))
@@ -196,10 +197,17 @@ internal class Differ
 
         var lastFieldInTarget = targetFields[^1];
         var targetBaseFields = new List<CppField>();
-        foreach (var targetBaseType in targetClass.BaseTypes)
+        var baseTypes = targetClass.BaseTypes;
+        do
         {
-            targetBaseFields.AddRange(((CppClass)targetBaseType.Type).Fields);
-        }
+            foreach (var targetBaseType in baseTypes)
+            {
+                var baseClass = (CppClass)targetBaseType.Type;
+                targetBaseFields.AddRange(baseClass.Fields);
+                baseTypes = baseClass.BaseTypes;
+            }
+        } while (baseTypes is List<CppBaseType> { Count: > 0 });
+
         foreach (CppField inputField in inputContainer)
         {
             if (targetBaseFields.Find(targetBaseField => targetBaseField.Name == inputField.Name) is CppField { })
@@ -281,51 +289,59 @@ internal class Differ
 
     private bool TryAddType(CppTypeDeclaration @base, CppType type)
     {
-        if (type.IsKnownType || type.IsPrimitiveType || type.IsTypeDef || type.TypeName.EndsWith("__Class"))
+        if (type.IsKnownType || type.IsPrimitiveType || type.IsTypeDef)
             return true;    // pretend that we just insert these types.
 
         ref var types = ref CollectionsMarshal.GetValueRefOrAddDefault(_insertionMap, @base, out var exists);
         if (!exists)
             types = [];
 
-        types!.Insert(0, type);
+        if (TryWalkTypeHierarchy(ref type))
+        {
+            Debug.Assert(!type.HasElementType);
 
-        return TryWalkTypeHierarchy(ref type);
+            types!.Insert(0, type);
+            return true;
+        }
+
+        return false;
     }
 
-    private bool TryWalkTypeHierarchy(ref CppType type)
+    private bool TryWalkTypeHierarchy(ref CppType type, bool deep = false)
     {
         if (_walkedClasses.Contains(type.TypeName))
             return true;
 
         if (type.IsKnownType || type.IsPrimitiveType || type.IsTypeDef)
-            return true;
+            return deep;
 
         var typeName = type.TypeName;
         var isGeneric = type.IsGenericType;
         if (typeName.EndsWith("__Class"))
         {
-            Log.Debug($"{type.TypeName} => Il2CppClass");
-            type = _prebuiltTypes["Il2CppClass*"];
-            return true;
+            RemapClassType(ref type, _prebuiltTypes["Il2CppClass"]);
+            return false;
         }
         else if (typeName.EndsWith("__Array"))
         {
-            Log.Debug($"{type.TypeName} => Il2CppArray");
-            type = _prebuiltTypes["Il2CppArray*"];
-            return true;
+            RemapClassType(ref type, _prebuiltTypes["Il2CppArray"]);
+            return false;
+        }
+        else if (typeName.EndsWith("Delegate"))
+        {
+            RemapClassType(ref type, _prebuiltTypes["Il2CppObject"]);
+            return false;
         }
         else if (isGeneric && (typeName.StartsWith("Action_") || typeName.StartsWith("Func_")))
         {
-            Log.Debug($"{type.TypeName} => Action");
-            type = _prebuiltTypes["Action*"];
-            return true;
+            RemapClassType(ref type, _prebuiltTypes["Action"]);
+            return false;
         }
 
         if (type.HasElementType)
         {
-            var eType = ((CppTypeWithElementType)type).ElementType;
-            return TryWalkTypeHierarchy(ref eType);
+            type = ((CppTypeWithElementType)type).ElementType;
+            return TryWalkTypeHierarchy(ref type);
         }
 
         _walkedClasses.Add(type.TypeName);
@@ -337,7 +353,7 @@ internal class Differ
 
                 if (!fieldType.IsPointerType)
                 {
-                    if (!TryWalkTypeHierarchy(ref fieldType))
+                    if (!TryWalkTypeHierarchy(ref fieldType, true))
                         field.Comment = UnresolvedComment;
                     continue;
                 }
@@ -357,26 +373,23 @@ internal class Differ
                 }
                 if (Unsafe.IsNullRef(ref resolvedTargetType) && !resolvedInMap)
                 {
-                    var previousType = field.Type;
+                    ref var refToFieldType = ref FieldTypeAsRef(field);
                     if (typeName.EndsWith("__Class"))
                     {
-                        field.Type = _prebuiltTypes["Il2CppClass*"];
+                        RemapClassType(ref refToFieldType, _prebuiltTypes["Il2CppClass"]);
                     }
                     else if (typeName.EndsWith("__Array"))
                     {
-                        field.Type = _prebuiltTypes["Il2CppArray*"];
+                        RemapClassType(ref refToFieldType, _prebuiltTypes["Il2CppArray"]);
                     }
                     else if (!CppTypeExt.KnownTypes.Contains(typeName))
                     {
-                        field.Type = _prebuiltTypes["Il2CppObject*"];
+                        RemapClassType(ref refToFieldType, _prebuiltTypes["Il2CppObject"]);
                     }
                     else if (isGeneric && (typeName.StartsWith("Action_") || typeName.StartsWith("Func_")))
                     {
-                        field.Type = _prebuiltTypes["Action*"];
+                        RemapClassType(ref refToFieldType, _prebuiltTypes["Action"]);
                     }
-
-                    if (!previousType.IsSameType(field.Type))
-                        Log.Debug($"{typeName} => {field.Type.TypeName}");
                 }
             }
         }
@@ -389,6 +402,27 @@ internal class Differ
 
         return true;
     }
+
+    private static void RemapClassType(ref CppType target, CppType type)
+    {
+        if (!target.HasElementType)
+        {
+            Log.Debug($"{target.FullName} => {type.FullName}");
+            target = type;
+            return;
+        }
+
+        ref var refToElementType = ref ClassElementTypeAsRef((CppTypeWithElementType)target);
+        string oldName = target.FullName;
+        refToElementType = type;
+        Log.Debug($"{oldName} => {target.FullName}");
+    }
+
+    [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "<ElementType>k__BackingField")]
+    private static extern ref CppType ClassElementTypeAsRef(CppTypeWithElementType @this);
+
+    [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "<Type>k__BackingField")]
+    private static extern ref CppType FieldTypeAsRef(CppField @this);
 
     [UnsafeAccessor(UnsafeAccessorKind.Method, Name = "set_Parent")]
     private static extern void SetElementParent(CppElement @this, ICppContainer parent);
