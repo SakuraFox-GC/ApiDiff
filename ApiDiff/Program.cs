@@ -7,6 +7,8 @@ namespace ApiDiff
 
         static void Main(string[] args)
         {
+            Console.Title = nameof(ApiDiff);
+
             if (args.Length < 3)
             {
                 PrintHelp();
@@ -24,9 +26,24 @@ namespace ApiDiff
                 throw new DirectoryNotFoundException($"AndroidNDKSysrootIncludeDir {includeDir} not exists.");
 
             var headerDiffer = new Differ(inputHeader, targetHeader, includeDir);
-            Log.Info($"\n{headerDiffer.Generate()}");
+            if (!headerDiffer.BuildTypeModel())
+            {
+                Log.Error("Failed to build type model.", null, nameof(headerDiffer.BuildTypeModel));
+                return;
+            }
 
+            Log.FloodColour = true;
+            Log.Info("Constructing target header...", null, nameof(headerDiffer.ConstructDefinitions));
+            Log.FloodColour = false;
+            var generatedHeader = headerDiffer.ConstructDefinitions();
+            Log.FloodColour = true;
+            Log.Info($@"
+Construction all done! Press any key to apply the changes to the target header
+
+  Target Header File:
+    {targetHeader}", null, nameof(headerDiffer.ConstructDefinitions));
             Console.ReadKey(true);
+            File.WriteAllText(targetHeader, generatedHeader);
         }
 
         private static void PrintHelp()
@@ -56,8 +73,9 @@ Notes:
             }
             else
             {
+                Log.FloodColour = true;
                 Log.Error("This programme has been proper baffled.", (Exception)e.ExceptionObject, "WatchDog");
-                Thread.Sleep(10000);
+                Thread.Sleep(5000);
             }
         }
 
