@@ -249,7 +249,7 @@ internal static class CppTypeExt
             {
                 if (arrayType.ElementType is CppPointerType pointerType)
                 {
-                    builder.Append($"{pointerType.ConstructDefinition()} ");
+                    builder.Append(pointerType.ConstructDefinition());
                 }
                 else
                 {
