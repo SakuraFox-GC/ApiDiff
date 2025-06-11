@@ -158,12 +158,12 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
         List<CppType> globalDeclarations = [];
         foreach (var neededGlobalType in CppTypeExt.GlobalConfig.GetBuiltInTypes())
         {
-            if (_targetCompilation.Classes.FirstOrDefault(def => def.TypeName == neededGlobalType) is not CppClass @class)
+            if (_targetCompilation!.Classes.FirstOrDefault(def => def.TypeName == neededGlobalType) is not CppClass @class)
                 continue;
 
             globalDeclarations.Add(@class);
         }
-        globalDeclarations.InsertRange(0, _targetCompilation.Typedefs.Where(def => !_targetIncludes.Contains(def.SourceFile) && def.Name != "size_t"));
+        globalDeclarations.InsertRange(0, _targetCompilation!.Typedefs.Where(def => !_targetIncludes.Contains(def.SourceFile) && def.Name != "size_t"));
         foreach (var def in globalDeclarations)
         {
             headerBuilder.AppendLine($"{def.ConstructDefinition()};");
