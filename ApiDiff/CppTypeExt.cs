@@ -281,7 +281,7 @@ internal static class CppTypeExt
             return builder.ToString();
         }
 
-        public bool IsSameField(CppField right) => (field.Name == right.Name) || (field.Name.Replace("_k__BackingField", string.Empty) == right.Name);
+        public bool IsSameField(CppField right) => field.Name == right.Name;
 
     }
 

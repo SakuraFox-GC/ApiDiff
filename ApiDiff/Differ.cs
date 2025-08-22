@@ -323,7 +323,7 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
             }
 
             if (targetBaseFields.Find(inputField.IsSameField) is CppField { })
-                continue;
+                break;
 
             if (!TryUpdateField(targetClass, ref inputField))
                 inputField.Comment = UnresolvedComment;
