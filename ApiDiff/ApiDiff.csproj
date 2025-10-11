@@ -12,16 +12,22 @@
     <IsAotCompatible>true</IsAotCompatible>
     <PublishAot>true</PublishAot>
     <OptimizationPreference>Speed</OptimizationPreference>
+		<UseSizeOptimizedLinq>false</UseSizeOptimizedLinq>
     <IlcInstructionSet>native</IlcInstructionSet>
   </PropertyGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\deps\CppAst.NET\src\CppAst\CppAst.csproj" />
-    <PackageReference Include="Microsoft.Windows.CsWin32" Version="0.3.198">
+    <PackageReference Include="Microsoft.Windows.CsWin32" Version="0.3.213">
       <PrivateAssets>all</PrivateAssets>
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
     </PackageReference>
   </ItemGroup>
+
+	<PropertyGroup Condition="$(_IsPublishing) == 'true' and $(Configuration) == 'Release'">
+		<DebuggerSupport>false</DebuggerSupport>
+		<StackTraceSupport>false</StackTraceSupport>
+	</PropertyGroup>
 
   <PropertyGroup>
     <!-- Workaround for issue https://github.com/microsoft/ClangSharp/issues/129 -->
