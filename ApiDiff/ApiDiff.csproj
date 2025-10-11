@@ -12,7 +12,7 @@
     <IsAotCompatible>true</IsAotCompatible>
     <PublishAot>true</PublishAot>
     <OptimizationPreference>Speed</OptimizationPreference>
-		<UseSizeOptimizedLinq>false</UseSizeOptimizedLinq>
+    <UseSizeOptimizedLinq>false</UseSizeOptimizedLinq>
     <IlcInstructionSet>native</IlcInstructionSet>
   </PropertyGroup>
 
@@ -24,10 +24,10 @@
     </PackageReference>
   </ItemGroup>
 
-	<PropertyGroup Condition="$(_IsPublishing) == 'true' and $(Configuration) == 'Release'">
-		<DebuggerSupport>false</DebuggerSupport>
-		<StackTraceSupport>false</StackTraceSupport>
-	</PropertyGroup>
+  <PropertyGroup Condition="$(_IsPublishing) == 'true' and $(Configuration) == 'Release'">
+    <DebuggerSupport>false</DebuggerSupport>
+    <StackTraceSupport>false</StackTraceSupport>
+  </PropertyGroup>
 
   <PropertyGroup>
     <!-- Workaround for issue https://github.com/microsoft/ClangSharp/issues/129 -->
