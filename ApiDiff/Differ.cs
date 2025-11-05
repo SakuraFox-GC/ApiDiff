@@ -102,7 +102,7 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
                 }
             }
 
-            if (originalType.Comment.Equals(MacroIdArray) || originalType.Comment.Equals(MacroIdList))
+            if (originalType.Comment is { } comment && ((comment == MacroIdArray) || (comment == MacroIdList)))
             {
                 Log.Info($"Skipping expanded {typeKind} {originalType.TypeName}.");
             }

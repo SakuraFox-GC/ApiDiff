@@ -9,7 +9,15 @@ internal record JsonConfig
 
     public required string LastBuiltInTypeName { get; init; }
 
-    public Dictionary<string, string> KnownReservedSuffixes { get; init { KnownReservedSuffixesFast.AddRange(value.Keys); } } = [];
+    public Dictionary<string, string> KnownReservedSuffixes
+    {
+        get;
+        init
+        {
+            KnownReservedSuffixesFast.AddRange(value.Keys);
+            field = value;
+        }
+    } = [];
 
     public Dictionary<string, string> RemappedTypes { get; init; } = [];
 
