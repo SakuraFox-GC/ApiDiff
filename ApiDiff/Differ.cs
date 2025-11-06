@@ -27,7 +27,7 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
         if (_typeSystemWalked)
             return false;
 
-        CppParserOptions cppParserOptions = new() { TargetCpu = CppTargetCpu.ARM64, TargetSystem = "linux", ParseMacros = true };
+        CppParserOptions cppParserOptions = new() { TargetCpu = CppTargetCpu.ARM64, TargetSystem = "linux", TargetAbi = "android21", ParseMacros = true };
         cppParserOptions.Defines.Add("_IDACLANG_=1");
         var sysRootInclude = new DirectoryInfo(IncludeDir);
         cppParserOptions.IncludeFolders.Add(new FileInfo(TargetHeader).Directory!.FullName);
@@ -53,7 +53,7 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
         _inputDeclarations.AddRange([.. _inputCompilation.Typedefs, .. _inputCompilation.Enums, .. _inputCompilation.Classes]);
         _targetDeclarations.AddRange([.. appNamespace.Enums, .. appNamespace.Classes]);
 
-        _inputDeclarations.AddRange([.. _inputCompilation.Typedefs, .. _inputCompilation.Enums, .. _inputCompilation.Classes]);
+        //_inputDeclarations.AddRange([.. _inputCompilation.Typedefs, .. _inputCompilation.Enums, .. _inputCompilation.Classes]);
         _targetGlobalDeclarations.AddRange(_targetCompilation.Children().OfType<CppTypeDeclaration>());
         _targetDeclarations.AddRange(_targetGlobalDeclarations.Where(def => def.Parent is CppNamespace));
         _inputDeclarations.SortBySourceLocation();
