@@ -1,4 +1,4 @@
-﻿using System.Runtime.CompilerServices;
+using System.Runtime.CompilerServices;
 
 namespace ApiDiff
 {
@@ -19,11 +19,19 @@ namespace ApiDiff
 
             string inputHeader = args[0], targetHeader = args[1], includeDir = args[2];
             if (!File.Exists(inputHeader))
+            {
                 throw new FileNotFoundException("InputHeaderFilePath not exists.", inputHeader);
+            }
+
             if (!File.Exists(targetHeader))
+            {
                 throw new FileNotFoundException("TargetHeaderFilePath not exists.", targetHeader);
+            }
+
             if (!Directory.Exists(includeDir))
+            {
                 throw new DirectoryNotFoundException($"AndroidNDKSysrootIncludeDir {includeDir} not exists.");
+            }
 
             var headerDiffer = new Differ(inputHeader, targetHeader, includeDir);
             if (!headerDiffer.BuildTypeModel())
@@ -35,7 +43,7 @@ namespace ApiDiff
             Log.FloodColour = true;
             Log.Info("Constructing target header...", null, nameof(headerDiffer.ConstructDefinitions));
             Log.FloodColour = false;
-            var generatedHeader = headerDiffer.ConstructDefinitions();
+            string generatedHeader = headerDiffer.ConstructDefinitions();
             Log.FloodColour = true;
             Log.Info($@"
 Construction all done! Press any key to apply the changes to the target header

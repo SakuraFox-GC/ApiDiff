@@ -1,4 +1,4 @@
-﻿using System.Buffers;
+using System.Buffers;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -18,37 +18,65 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
     private readonly List<CppType> _insertedTypes = [];
     private readonly Dictionary<CppTypeDeclaration, List<CppType>> _insertionMap = [];
     private readonly Dictionary<CppCommentText, List<int>> _macrosExpansionIndex = [];
-    private HashSet<string> _targetIncludes = [], _walkedClasses = [];
+    private HashSet<string> _targetIncludes = [];
+    private readonly HashSet<string> _walkedClasses = [];
     private CppCompilation? _inputCompilation, _targetCompilation;
     private bool _typeSystemWalked = false;
 
     public bool BuildTypeModel()
     {
         if (_typeSystemWalked)
+        {
             return false;
+        }
 
-        CppParserOptions cppParserOptions = new() { TargetCpu = CppTargetCpu.ARM64, TargetSystem = "linux", TargetAbi = "android21", ParseMacros = true };
-        cppParserOptions.Defines.Add("_IDACLANG_=1");
-        var sysRootInclude = new DirectoryInfo(IncludeDir);
+        bool targetWindows = IncludeDir.Contains("Windows Kits");
+        CppParserOptions cppParserOptions = targetWindows ? new() { ParseMacros = true } : new() { TargetCpu = CppTargetCpu.ARM64, TargetSystem = "linux", TargetAbi = "android21", ParseMacros = true };
+        if (targetWindows)
+        {
+            cppParserOptions.ConfigureForWindowsMsvc(CppTargetCpu.X86_64);
+        }
+        cppParserOptions.Defines.Add(targetWindows ? "_GHIDRA_=1" : "_IDACLANG_=1");
         cppParserOptions.IncludeFolders.Add(new FileInfo(TargetHeader).Directory!.FullName);
-        cppParserOptions.SystemIncludeFolders.Add(Path.Combine(sysRootInclude.FullName, "c++", "v1"));
-        cppParserOptions.SystemIncludeFolders.Add(sysRootInclude.FullName);
+        if (targetWindows)
+        {
+            var winSdkRoot = new DirectoryInfo(IncludeDir);
+            cppParserOptions.SystemIncludeFolders.Add(Path.Combine(winSdkRoot.FullName, "ucrt"));
+            cppParserOptions.SystemIncludeFolders.Add(Path.Combine(winSdkRoot.FullName, "shared"));
+            cppParserOptions.SystemIncludeFolders.Add(Path.Combine(winSdkRoot.FullName, "um"));
+        }
+        else
+        {
+            var sysRootInclude = new DirectoryInfo(IncludeDir);
+            cppParserOptions.SystemIncludeFolders.Add(Path.Combine(sysRootInclude.FullName, "c++", "v1"));
+            cppParserOptions.SystemIncludeFolders.Add(sysRootInclude.FullName);
+        }
 
         _inputCompilation = TryParseHeader(File.ReadAllText(InputHeader), "input", cppParserOptions);
         if (_inputCompilation.HasErrors)
+        {
             return false;
+        }
 
-        var targetFileContent = File.ReadAllText(TargetHeader).Replace("#pragma once", $"#pragma once\ntypedef unsigned long size_t;");
+        string targetFileContent = File.ReadAllText(TargetHeader).Replace("#pragma once", $"#pragma once\ntypedef {(targetWindows ? "unsigned __int64" : "unsigned long")} size_t;");
+        if (targetWindows)
+        {
+            targetFileContent = targetFileContent.Replace("<cstdint>", "<stdint.h>");
+        }
         _macrosExpansionIndex.Add(MacroIdArray, FindAllOccurrencesMacroIndex(targetFileContent, "DO_ARRAY_DEFINE"));
         _macrosExpansionIndex.Add(MacroIdList, FindAllOccurrencesMacroIndex(targetFileContent, "DO_LIST_DEFINE"));
         _targetCompilation = TryParseHeader(targetFileContent, "target", cppParserOptions);
         if (_targetCompilation.HasErrors)
+        {
             return false;
+        }
 
         _targetIncludes = [.. _targetCompilation.InclusionDirectives.Select(targetInclude => { return targetInclude.FileName; })];
-        var appNamespace = _targetCompilation.Namespaces.FirstOrDefault(@namespace => @namespace.Name == "app");
+        CppNamespace? appNamespace = _targetCompilation.Namespaces.FirstOrDefault(@namespace => @namespace.Name == "app");
         if (appNamespace is null)
+        {
             return false;
+        }
 
         _inputDeclarations.AddRange([.. _inputCompilation.Typedefs, .. _inputCompilation.Enums, .. _inputCompilation.Classes]);
         _targetDeclarations.AddRange([.. appNamespace.Enums, .. appNamespace.Classes]);
@@ -59,30 +87,32 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
         _inputDeclarations.SortBySourceLocation();
         _targetDeclarations.SortBySourceLocation();
 
-        foreach (var targetDeclaration in _targetDeclarations)
+        foreach (CppTypeDeclaration targetDeclaration in _targetDeclarations)
         {
             SetElementParent(targetDeclaration, null!);
-            foreach (var (macroID, indexes) in _macrosExpansionIndex)
+            foreach ((CppCommentText? macroID, List<int>? indexes) in _macrosExpansionIndex)
             {
                 if (indexes.Exists(idx => idx == targetDeclaration.Span.Start.Offset))
+                {
                     targetDeclaration.Comment = macroID;
+                }
             }
         }
 
-        foreach (var knownName in CppTypeExt.GlobalConfig.KnownNames)
+        foreach (string knownName in CppTypeExt.GlobalConfig.KnownNames)
         {
             LoadPrebuiltType(knownName);
         }
-        foreach (var knownName in CppTypeExt.GlobalConfig.KnownReservedSuffixes.Values)
+        foreach (string knownName in CppTypeExt.GlobalConfig.KnownReservedSuffixes.Values)
         {
             LoadPrebuiltType(knownName);
         }
 
         _targetDeclarations.RemoveAll(def => def.SizeOf == 0);
-        var rawData = CollectionsMarshal.AsSpan(_targetDeclarations);
+        Span<CppTypeDeclaration> rawData = CollectionsMarshal.AsSpan(_targetDeclarations);
         for (int i = rawData.Length - 1; i >= 0; --i)
         {
-            ref var originalType = ref rawData[i];
+            ref CppTypeDeclaration originalType = ref rawData[i];
             string typeKind = originalType.TypeKind.ToString().ToLower();
             if (originalType is CppClass cppClass)
             {
@@ -108,19 +138,21 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
             }
             else
             {
-                Log.Warn($"Skipping invalid {typeKind} {originalType.TypeName}.");
+                Log.Error($"Skipping invalid {typeKind} {originalType.TypeName}.");
                 originalType.Comment = UnresolvedComment;
             }
         }
 
-        foreach (ref var targetType in rawData)
+        foreach (ref CppTypeDeclaration targetType in rawData)
         {
-            ref var insertionList = ref CollectionsMarshal.GetValueRefOrNullRef(_insertionMap, targetType);
+            ref List<CppType> insertionList = ref CollectionsMarshal.GetValueRefOrNullRef(_insertionMap, targetType);
             if (Unsafe.IsNullRef(ref insertionList))
+            {
                 continue;
+            }
 
             var removalList = new List<CppType>();
-            foreach (var typeToInsert in insertionList!)
+            foreach (CppType? typeToInsert in insertionList!)
             {
                 if (_insertedTypes.Any(insertedType => insertedType.IsSameType(typeToInsert)))
                 {
@@ -131,7 +163,7 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
                 _insertedTypes.Add(typeToInsert);
             }
 
-            foreach (var typeToRemove in removalList)
+            foreach (CppType typeToRemove in removalList)
             {
                 insertionList.Remove(typeToRemove);
             }
@@ -156,47 +188,56 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
         headerBuilder.AppendLine();
 
         List<CppType> globalDeclarations = [];
-        foreach (var neededGlobalType in CppTypeExt.GlobalConfig.GetBuiltInTypes())
+        foreach (string neededGlobalType in CppTypeExt.GlobalConfig.GetBuiltInTypes())
         {
             if (_targetCompilation!.Classes.FirstOrDefault(def => def.TypeName == neededGlobalType) is not CppClass @class)
+            {
                 continue;
+            }
 
             globalDeclarations.Add(@class);
         }
         globalDeclarations.InsertRange(0, _targetCompilation!.Typedefs.Where(def => !_targetIncludes.Contains(def.SourceFile) && def.Name != "size_t"));
-        foreach (var def in globalDeclarations)
+        foreach (CppType def in globalDeclarations)
         {
             headerBuilder.AppendLine($"{def.ConstructDefinition()};");
             headerBuilder.AppendLine();
         }
         headerBuilder.AppendLine("namespace app {");
         headerBuilder.AppendLine();
-        foreach (var @enum in _targetDeclarations.OfType<CppEnum>())
+        foreach (CppEnum @enum in _targetDeclarations.OfType<CppEnum>())
         {
             headerBuilder.AppendLine($"{@enum.ConstructDefinition()};");
             headerBuilder.AppendLine();
         }
-        foreach (var insertedEnum in _insertedTypes.OfType<CppEnum>())
+        foreach (CppEnum insertedEnum in _insertedTypes.OfType<CppEnum>())
         {
             headerBuilder.AppendLine($"{insertedEnum.ConstructDefinition()};");
             headerBuilder.AppendLine();
         }
-        foreach (ref var data in CollectionsMarshal.AsSpan(_targetDeclarations))
+        foreach (ref CppTypeDeclaration data in CollectionsMarshal.AsSpan(_targetDeclarations))
         {
             if (data is not CppClass { } @class)
+            {
                 continue;
+            }
 
             if (UnresolvedComment.Equals(data.Comment))
+            {
                 continue;
+            }
 
             if (MacroIdList.Equals(data.Comment) || MacroIdArray.Equals(data.Comment))
             {
-                var macroName = ((CppCommentText)data.Comment).Text;
-                var typeName = @class.Name;
+                string macroName = ((CppCommentText)data.Comment).Text;
+                string typeName = @class.Name;
                 if (typeName.EndsWith("__Array"))
                 {
                     if (MacroIdList.Equals(data.Comment))
+                    {
                         continue;
+                    }
+
                     typeName = typeName[..^7];
                 }
                 else
@@ -209,10 +250,10 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
                 continue;
             }
 
-            ref var insertionList = ref CollectionsMarshal.GetValueRefOrNullRef(_insertionMap, data);
+            ref List<CppType> insertionList = ref CollectionsMarshal.GetValueRefOrNullRef(_insertionMap, data);
             if (!Unsafe.IsNullRef(ref insertionList))
             {
-                foreach (var insertedType in insertionList)
+                foreach (CppType? insertedType in insertionList)
                 {
                     headerBuilder.AppendLine($"{insertedType.ConstructDefinition()};");
                     headerBuilder.AppendLine();
@@ -232,10 +273,10 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
         CppCompilation compilation = CppParser.Parse(content, parserOptions, name);
         if (compilation.Diagnostics.HasErrors)
         {
-            var errors = compilation.Diagnostics.Messages.Where(message => message.Type == CppLogMessageType.Error);
+            IEnumerable<CppDiagnosticMessage> errors = compilation.Diagnostics.Messages.Where(message => message.Type == CppLogMessageType.Error);
             Log.Error($"Compilation ended with {errors.Count()} errors generated.");
             Log.FloodColour = true;
-            foreach (var error in errors)
+            foreach (CppDiagnosticMessage? error in errors)
             {
                 Log.Error(error.ToString());
             }
@@ -253,9 +294,11 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
     private CppTypeDeclaration? LoadPrebuiltType(string typeName)
     {
         if (_prebuiltTypes.TryGetValue(typeName, out CppType? value))
+        {
             return value as CppTypeDeclaration;
+        }
 
-        ref var requiredType = ref _inputDeclarations.TryFindType(typeName);
+        ref CppTypeDeclaration requiredType = ref _inputDeclarations.TryFindType(typeName);
         if (Unsafe.IsNullRef(ref requiredType))
         {
             Log.Warn($"Can not load prebuilt type {typeName}, maybe it's a dummy type?");
@@ -269,17 +312,28 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
     private unsafe bool TryWalkClassFieldsUpdate(ref CppClass targetClass)
     {
         if (_walkedClasses.Contains(targetClass.TypeName))
+        {
             return true;
+        }
 
         ref CppTypeDeclaration inputType = ref _inputDeclarations.TryFindType(targetClass);
         if (Unsafe.IsNullRef(ref inputType))
-            return false;
+        {
+            Log.Warn($"Can not find type {targetClass.TypeName}, use relaxed mode.");
+            inputType = ref _inputDeclarations.TryFindType(targetClass, true);
+            if (Unsafe.IsNullRef(ref inputType))
+            {
+                return false;
+            }
+        }
 
         if (inputType is not CppClass { } inputClass)
+        {
             return false;
+        }
 
         using var pinnedGCHandleForTargetContainer = new PinnedGCHandle<CppContainerList<CppField>>(targetClass.Fields);
-        ref var targetFields = ref Unsafe.AsRef<List<CppField>>(pinnedGCHandleForTargetContainer.GetAddressOfObjectData());
+        ref List<CppField> targetFields = ref Unsafe.AsRef<List<CppField>>(pinnedGCHandleForTargetContainer.GetAddressOfObjectData());
         CppContainerList<CppField> inputContainer = inputClass.Fields;
         List<CppField> rebuiltFields = [];
         if ((inputContainer.Count == targetFields.Count) && (inputContainer.Sum(def => def.Type.SizeOf) == targetFields.Sum(def => def.Type.SizeOf)))
@@ -287,9 +341,14 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
             goto COMPARE_SAME_LENGTH;
         }
 
-        var lastFieldInTarget = targetFields[^1];
+        if (targetFields.Count == 0)
+        {
+            goto MODIFY_AND_RETURN;
+        }
+
+        CppField lastFieldInTarget = targetFields[^1];
         var targetBaseFields = new List<CppField>();
-        var baseTypes = targetClass.BaseTypes;
+        List<CppBaseType> baseTypes = targetClass.BaseTypes;
         while (baseTypes is List<CppBaseType> { Count: > 0 })
         {
             var baseClass = (CppClass)baseTypes[0].Type;
@@ -297,9 +356,11 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
             {
                 for (int i = baseClass.Fields.Count - 1; i >= 0; --i)
                 {
-                    var baseField = baseClass.Fields[i];
+                    CppField baseField = baseClass.Fields[i];
                     if (targetBaseFields.Any(def => def.Name == baseField.Name))
+                    {
                         continue;
+                    }
 
                     targetBaseFields.Add(baseField);
                 }
@@ -308,12 +369,14 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
             baseTypes = baseClass.BaseTypes;
         }
 
-        var lastFieldInInput = inputContainer.FirstOrDefault(field => field.IsSameField(lastFieldInTarget));
-        var indexOfLastField = lastFieldInInput is null ? -1 : inputContainer.IndexOf(lastFieldInInput);
+        CppField? lastFieldInInput = inputContainer.FirstOrDefault(field => field.IsSameField(lastFieldInTarget));
+        int indexOfLastField = lastFieldInInput is null ? -1 : inputContainer.IndexOf(lastFieldInInput);
         for (int i = inputContainer.Count - 1; i >= 0; --i)
         {
             if (indexOfLastField > -1 && i > indexOfLastField)
+            {
                 continue;
+            }
 
             CppField inputField = inputContainer[i];
             if (targetFields.Find(inputField.IsSameField) is CppField { } matchedField)
@@ -323,10 +386,14 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
             }
 
             if (targetBaseFields.Find(inputField.IsSameField) is CppField { })
+            {
                 break;
+            }
 
             if (!TryUpdateField(targetClass, ref inputField))
+            {
                 inputField.Comment = UnresolvedComment;
+            }
 
             rebuiltFields.Add(inputField);
         }
@@ -381,51 +448,100 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
                     return;
                 }
             }
+            else if (f1.Name == "vector")
+            {
+                rebuiltFields.Add(f1);
+                return;
+            }
 
             if (!TryUpdateField((CppTypeDeclaration)f2.Parent, ref f1))
+            {
                 f1.Comment = UnresolvedComment;
+            }
 
             rebuiltFields.Add(f1);
         }
     }
 
-    private bool TryWalkEnum(ref CppEnum targetEnum)
+    private unsafe bool TryWalkEnum(ref CppEnum targetEnum)
     {
         ref CppTypeDeclaration inputType = ref _inputDeclarations.TryFindType(targetEnum);
         if (Unsafe.IsNullRef(ref inputType))
-            return false;
+        {
+            Log.Warn($"Can not find enum {targetEnum.TypeName}, use relaxed mode.");
+            string itemName = targetEnum.Items.First().Name;
+            string searchName = itemName.Contains("__Enum") ? itemName[..(itemName.LastIndexOf("__Enum") + 6)] : itemName;
+            Log.Warn($"Searching enum {targetEnum.TypeName} use relaxed mode.");
+            inputType = ref _inputDeclarations.TryFindType(searchName, true);
+            if (Unsafe.IsNullRef(ref inputType))
+            {
+                return false;
+            }
+        }
 
         if (inputType is not CppEnum { } inputEnum)
+        {
             throw new InvalidOperationException("input declaration is not a enum");
+        }
 
-        var parent = targetEnum.Parent;
-        targetEnum = ref Unsafe.As<CppTypeDeclaration, CppEnum>(ref inputType);
-        SetElementParent(targetEnum, parent);
+        using var pinnedGCHandleForTargetContainer = new PinnedGCHandle<CppContainerList<CppEnumItem>>(targetEnum.Items);
+        ref List<CppEnumItem> targetItems = ref Unsafe.AsRef<List<CppEnumItem>>(pinnedGCHandleForTargetContainer.GetAddressOfObjectData());
+
+        using var pinnedGCHandleForInputContainer = new PinnedGCHandle<CppContainerList<CppEnumItem>>(inputEnum.Items);
+        ref List<CppEnumItem> inputItems = ref Unsafe.AsRef<List<CppEnumItem>>(pinnedGCHandleForInputContainer.GetAddressOfObjectData());
+
+        //ICppContainer parent = targetEnum.Parent;
+        //targetEnum = ref Unsafe.As<CppTypeDeclaration, CppEnum>(ref inputType);
+        //SetElementParent(targetEnum, parent);
+
+        targetItems.Clear();
+        targetItems.AddRange(inputItems);
 
         return true;
     }
 
     private bool TryUpdateField(CppTypeDeclaration @base, ref CppField field, bool bypassHierarchyCheck = false)
     {
-        ref var type = ref FieldTypeAsRef(field);
+        ref CppType type = ref FieldTypeAsRef(field);
         if (type.IsKnownType || type.IsPrimitiveType || type.IsTypeDef)
+        {
             return true;    // pretend that we just insert these types.
+        }
 
         if (type is CppPointerType cppPointer)
         {
-            var eType = cppPointer.FindPointerBaseType(out _);
+            CppType eType = cppPointer.FindPointerBaseType(out _);
             ref CppTypeDeclaration resolvedEType = ref _targetGlobalDeclarations.TryFindType(eType); // try to find the very first base type
             if (Unsafe.IsNullRef(ref resolvedEType))
+            {
                 return TryWalkTypeHierarchy(@base, ref type);                                               // if not, remap type
+            }
+        }
+        else if (type is CppArrayType cppArray)
+        {
+            CppType eType = cppArray.ElementType;
+            if (TryWalkTypeHierarchy(@base, ref eType))
+            {
+                type = eType;
+            }
+            else
+            {
+                type = _prebuiltTypes["Il2CppObject"];
+            }
+            return true;
         }
 
         ref CppTypeDeclaration resolvedType = ref _targetGlobalDeclarations.TryFindType(type);
         if (!Unsafe.IsNullRef(ref resolvedType))
+        {
             return true;
+        }
 
-        ref var types = ref CollectionsMarshal.GetValueRefOrAddDefault(_insertionMap, @base, out var exists);
+        ref List<CppType>? types = ref CollectionsMarshal.GetValueRefOrAddDefault(_insertionMap, @base, out bool exists);
         if (!exists)
+        {
             types = [];
+        }
 
         if (bypassHierarchyCheck || TryWalkTypeHierarchy(@base, ref type))
         {
@@ -438,13 +554,17 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
         return false;
     }
 
-    private unsafe bool TryWalkTypeHierarchy(CppTypeDeclaration @base, ref CppType type, bool deep = false)
+    private bool TryWalkTypeHierarchy(CppTypeDeclaration @base, ref CppType type, bool deep = false)
     {
         if (_walkedClasses.Contains(type.TypeName))
+        {
             return true;
+        }
 
         if (type.IsKnownType || type.IsPrimitiveType || type.IsTypeDef)
+        {
             return deep;
+        }
 
         if (type.HasElementType && !type.IsPointerType)
         {
@@ -460,11 +580,13 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
         {
             ref CppTypeDeclaration resolvedEnumType = ref _targetDeclarations.TryFindType(cppEnum.FullName);
             if (Unsafe.IsNullRef(ref resolvedEnumType))
+            {
                 type = _prebuiltTypes["int32_t"];
+            }
         }
         else if (type is CppPointerType pointerType)
         {
-            ref var refinedType = ref ClassElementTypeAsRef(pointerType);
+            ref CppType refinedType = ref ClassElementTypeAsRef(pointerType);
             TryRefineTypeSecondPass(ref refinedType);
         }
 
@@ -474,35 +596,42 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
     private unsafe void TryWalkClassFieldsNew(CppTypeDeclaration @base, ref CppClass @class)
     {
         using var pinnedGCHandleForClassContainer = new PinnedGCHandle<CppContainerList<CppField>>(@class.Fields);
-        ref var targetFields = ref Unsafe.AsRef<List<CppField>>(pinnedGCHandleForClassContainer.GetAddressOfObjectData());
-        foreach (ref var field in CollectionsMarshal.AsSpan(targetFields))
+        ref List<CppField> targetFields = ref Unsafe.AsRef<List<CppField>>(pinnedGCHandleForClassContainer.GetAddressOfObjectData());
+        foreach (ref CppField field in CollectionsMarshal.AsSpan(targetFields))
         {
             ref CppType fieldType = ref FieldTypeAsRef(field);
 
             if (!fieldType.IsPointerType)
             {
                 if (TryRefineFieldTypeFirstPass(ref field))
+                {
                     continue;
+                }
 
                 if (!TryWalkTypeHierarchy(@base, ref fieldType, true))
+                {
                     field.Comment = UnresolvedComment;
+                }
+
                 continue;
             }
 
             if (!TryRefineTypeSecondPass(ref fieldType))
+            {
                 field.Comment = UnresolvedComment;
+            }
         }
     }
 
-    private unsafe bool TryRefineTypeSecondPass(ref CppType type)
+    private bool TryRefineTypeSecondPass(ref CppType type)
     {
-        var typeName = type.TypeName;
-        var isGeneric = type.IsGenericType;
+        string typeName = type.TypeName;
+        bool isGeneric = type.IsGenericType;
         ref CppTypeDeclaration resolvedTargetType = ref _targetGlobalDeclarations.TryFindType(typeName);
         bool resolvedInMap = false;
-        foreach (var (_, insertionList) in _insertionMap)
+        foreach ((CppTypeDeclaration _, List<CppType>? insertionList) in _insertionMap)
         {
-            ref var insertedMatched = ref insertionList.TryFindType(typeName);
+            ref CppType insertedMatched = ref insertionList.TryFindType(typeName);
             if (!Unsafe.IsNullRef(ref insertedMatched))
             {
                 resolvedInMap = true;
@@ -513,13 +642,16 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
         {
             if (CppTypeExt.GlobalConfig.KnownReservedSuffixesFast.Find(suffix => typeName.EndsWith(suffix)) is string { } matched)
             {
-                var remappedType = _prebuiltTypes[CppTypeExt.GlobalConfig.KnownReservedSuffixes[matched]];
+                CppType remappedType = _prebuiltTypes[CppTypeExt.GlobalConfig.KnownReservedSuffixes[matched]];
                 if (remappedType is not CppEnum)
+                {
                     RemapType(ref type, remappedType);
+                    return true;
+                }
             }
             else if (isGeneric && (typeName.StartsWith("Action_") || typeName.StartsWith("Func_")))
             {
-                ref var builtInActionType = ref CollectionsMarshal.GetValueRefOrNullRef(_prebuiltTypes, "Action");
+                ref CppType builtInActionType = ref CollectionsMarshal.GetValueRefOrNullRef(_prebuiltTypes, "Action");
                 if (!Unsafe.IsNullRef(ref builtInActionType))
                 {
                     RemapType(ref type, builtInActionType);
@@ -535,17 +667,23 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
     private static unsafe bool TryRefineFieldTypeFirstPass(ref CppField field)
     {
         if (field.Type is not CppClass fieldClass)
+        {
             return false;
+        }
 
         if (field.Type.TypeName.Contains("FP"))
+        {
             return false;
+        }
 
         using var pinnedGCHandleForClassContainer = new PinnedGCHandle<CppContainerList<CppField>>(fieldClass.Fields);
-        ref var targetFields = ref Unsafe.AsRef<List<CppField>>(pinnedGCHandleForClassContainer.GetAddressOfObjectData());
+        ref List<CppField> targetFields = ref Unsafe.AsRef<List<CppField>>(pinnedGCHandleForClassContainer.GetAddressOfObjectData());
         if (targetFields.Count != 1 || !targetFields.TrueForAll(f => f.Type.IsPrimitiveType || (f.Type.IsTypeDef && ((CppTypedef)f.Type).ElementType.IsPrimitiveType)))
+        {
             return false;
+        }
 
-        var refineType = targetFields[0].Type;
+        CppType refineType = targetFields[0].Type;
         field.Type = refineType.IsTypeDef ? ((CppTypedef)refineType).ElementType : refineType;
         return true;
     }
@@ -559,7 +697,7 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
             return;
         }
 
-        ref var refToElementType = ref ClassElementTypeAsRef((CppTypeWithElementType)target);
+        ref CppType refToElementType = ref ClassElementTypeAsRef((CppTypeWithElementType)target);
         string oldName = target.FullName;
         refToElementType = type;
         Log.Debug($"{oldName} => {target.FullName}");
@@ -576,7 +714,9 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
         {
             int foundIndex = span.IndexOfAny(searchValues);
             if (foundIndex == -1)
+            {
                 break;
+            }
 
             indexes.Add(baseIndex + foundIndex);
 

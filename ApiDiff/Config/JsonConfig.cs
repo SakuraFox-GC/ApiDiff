@@ -1,4 +1,4 @@
-﻿using System.Runtime.InteropServices;
+using System.Runtime.InteropServices;
 
 namespace ApiDiff.Config;
 
@@ -25,7 +25,7 @@ internal record JsonConfig
 
     public Span<string> GetBuiltInTypes()
     {
-        var data = CollectionsMarshal.AsSpan(KnownNames);
+        Span<string> data = CollectionsMarshal.AsSpan(KnownNames);
 
         return data[..(KnownNames.IndexOf(LastBuiltInTypeName) + 1)];
     }

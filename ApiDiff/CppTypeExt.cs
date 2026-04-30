@@ -1,4 +1,4 @@
-﻿using System.Buffers;
+using System.Buffers;
 using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
@@ -17,6 +17,7 @@ internal static class CppTypeExt
 
     internal static readonly SearchValues<string> KnownTypesFast;
     internal static readonly JsonConfig GlobalConfig = new() { KnownNames = [], LastBuiltInTypeName = string.Empty };
+    private static readonly CppTypeComparer DefaultTypeComparer = new(), RelaxedTypeComparer = new() { RelaxedComparison = true };
 
     static CppTypeExt()
     {
@@ -27,7 +28,9 @@ internal static class CppTypeExt
             try
             {
                 if (JsonSerializer.Deserialize(File.ReadAllBytes(config.FullName), JsonConfigContext.Default.JsonConfig) is { KnownNames.Count: > 0, LastBuiltInTypeName.Length: > 0 } valid)
+                {
                     GlobalConfig = valid;
+                }
             }
             catch (Exception ex)
             {
@@ -42,33 +45,43 @@ internal static class CppTypeExt
         KnownTypesFast = SearchValues.Create([.. GlobalConfig.KnownNames], StringComparison.Ordinal);
     }
 
-    private static bool CompareTypeName(string left, string right)
+    private static bool CompareTypeName(string left, string right, bool relax)
     {
         if (GlobalConfig.KnownReservedSuffixesFast.Exists(suffix => left.EndsWith(suffix) != right.EndsWith(suffix)))
+        {
             return false;
+        }
 
         left = left.Replace("__Enum", string.Empty);
         right = right.Replace("__Enum", string.Empty);
 
-        bool leftUnderscore = left.Contains('_'), rightUnderscore = right.Contains('_');
-        if (leftUnderscore && !rightUnderscore)
+        int leftUnderscore = left.Count('_'), rightUnderscore = right.Count('_');
+        if (relax && (leftUnderscore > 0 && rightUnderscore == 0))
+        {
             return left[(left.LastIndexOf('_') + 1)..] == right;
+        }
 
-        if (rightUnderscore && !leftUnderscore)
+        if (relax && (rightUnderscore > 0 && leftUnderscore == 0))
+        {
             return right[(right.LastIndexOf('_') + 1)..] == left;
+        }
 
         return left == right;
     }
 
     private static bool CheckGeneric(string typeName)
     {
-        var indexOfUnderscore = typeName.IndexOf('_');
+        int indexOfUnderscore = typeName.IndexOf('_');
         if (indexOfUnderscore == -1)
+        {
             return false;
+        }
 
-        var subName = typeName[(indexOfUnderscore + 1)..];
+        string subName = typeName[(indexOfUnderscore + 1)..];
         if (subName.IsWhiteSpace())
+        {
             return false;
+        }
 
         return char.IsNumber(subName[0]) && GlobalConfig.KnownReservedSuffixesFast.TrueForAll(s => !typeName.EndsWith(s));
     }
@@ -112,7 +125,7 @@ internal static class CppTypeExt
 
         public string TypeName => type is CppTypeWithElementType eType ? eType.ElementType.FullName : type.FullName;
 
-        public bool IsSameType(string anotherTypeName)
+        public bool IsSameType(string anotherTypeName, bool relax = false)
         {
             string leftName = type.FullName, rightName = anotherTypeName;
             if (type.Parent is CppNamespace { } @namespace)
@@ -120,43 +133,61 @@ internal static class CppTypeExt
                 leftName = leftName.Replace($"{@namespace.Name}::", string.Empty);
             }
 
-            return CompareTypeName(leftName, rightName);
+            return CompareTypeName(leftName, rightName, relax);
         }
 
-        public bool IsSameType(CppType anotherType)
+        public bool IsSameType(CppType anotherType, bool relax = false)
         {
             if (type.Equals(anotherType))
+            {
                 return true;
+            }
 
             if (type.TypeKind != anotherType.TypeKind)
+            {
                 return false;
+            }
 
             if (type.IsGenericType != anotherType.IsGenericType)
+            {
                 return false;
+            }
 
-            var rightName = anotherType.FullName;
+            string rightName = anotherType.FullName;
             if (anotherType.Parent is CppNamespace { } anotherNamespace)
+            {
                 rightName = rightName.Replace($"{anotherNamespace.Name}::", string.Empty);
+            }
 
             if (GlobalConfig.RemappedTypes.TryGetValue(rightName, out string? value))
+            {
                 rightName = value;
+            }
 
-            return type.IsSameType(rightName);
+            return type.IsSameType(rightName, relax);
         }
 
         public string ConstructDefinition()
         {
             if (type is CppClass @class)
+            {
                 return @class.ConstructDefinition();
+            }
 
             if (type is CppEnum @enum)
+            {
                 return @enum.ConstructDefinition();
+            }
 
             if (type is CppTypedef typedef)
+            {
                 return typedef.ConstructDefinition();
+            }
 
             if (type is CppPrimitiveType primitive)
+            {
                 return MapPrimitiveType(primitive);
+            }
 
             throw new NotImplementedException($"{nameof(ConstructDefinition)} not implemented for {type.TypeKind}.");
         }
@@ -169,7 +200,7 @@ internal static class CppTypeExt
         public CppType FindPointerBaseType(out int depth)
         {
             depth = 1;
-            var eType = pointerType.ElementType;
+            CppType eType = pointerType.ElementType;
             while (eType.IsPointerType)
             {
                 ++depth;
@@ -181,7 +212,7 @@ internal static class CppTypeExt
 
         public string ConstructDefinition()
         {
-            var @base = pointerType.FindPointerBaseType(out var depth);
+            CppType @base = pointerType.FindPointerBaseType(out int depth);
             return $"{(@base is CppClass c ? c.ConstructDefinition(true) : @base.TypeName)} {new string('*', depth)}";
         }
 
@@ -193,10 +224,14 @@ internal static class CppTypeExt
         public string ConstructDefinition()
         {
             if (declaration is CppField field)
+            {
                 return field.ConstructDefinition();
+            }
 
             if (declaration is CppEnumItem enumItem)
+            {
                 return $"{enumItem.Name} = {enumItem.ValueExpression}";
+            }
 
             throw new NotImplementedException($"{nameof(ConstructDefinition)} not implemented for unknown declaration type.");
         }
@@ -210,16 +245,19 @@ internal static class CppTypeExt
         {
             var builder = new StringBuilder();
             if (field.Comment is CppCommentText commentText)
+            {
                 builder.Append($"/* {commentText.Text} */ ");
+            }
+
             if (field.Attributes is { Count: > 0 } attributes)
             {
-                foreach (var attribute in attributes)
+                foreach (CppAttribute? attribute in attributes)
                 {
                     builder.Append($"{attribute.ConstructDefinition()} ");
                 }
             }
 
-            var fieldType = field.Type;
+            CppType fieldType = field.Type;
             if (fieldType is CppClass @class)
             {
                 Debug.Assert(@class.SizeOf != 0 && @class.IsDefinition);
@@ -228,12 +266,16 @@ internal static class CppTypeExt
             }
             else if (fieldType is CppPointerType ptrType)
             {
-                var pointerType = ptrType.FindPointerBaseType(out var pointerDepth);
+                CppType pointerType = ptrType.FindPointerBaseType(out int pointerDepth);
                 if (pointerType is CppQualifiedType qualifiedType)
+                {
                     builder.Append($"{qualifiedType.Qualifier.ToString().ToLower()} ");
+                }
 
                 if (pointerType.SizeOf == 0 && pointerType is CppClass zeroSizeClass)
+                {
                     builder.Append($"{zeroSizeClass.ClassKind.ToString().ToLower()} ");
+                }
 
                 builder.Append($"{pointerType.TypeName} {new string('*', pointerDepth)}");
             }
@@ -281,22 +323,28 @@ internal static class CppTypeExt
             return builder.ToString();
         }
 
-        public bool IsSameField(CppField right) => field.Name == right.Name;
-
+        public bool IsSameField(CppField right)
+        {
+            return field.Name == right.Name;
+        }
     }
 
     extension(CppEnumItem enumItem)
     {
 
-        public string ConstructDefinition() => $"{enumItem.Name} = {enumItem.ValueExpression}";
-
+        public string ConstructDefinition()
+        {
+            return $"{enumItem.Name} = {enumItem.ValueExpression}";
+        }
     }
 
     extension(CppTypedef typedef)
     {
 
-        public string ConstructDefinition() => $"typedef {typedef.ElementType.ConstructDefinition()} {typedef.Name}";
-
+        public string ConstructDefinition()
+        {
+            return $"typedef {typedef.ElementType.ConstructDefinition()} {typedef.Name}";
+        }
     }
 
     extension(CppEnum @enum)
@@ -306,10 +354,12 @@ internal static class CppTypeExt
         {
             var builder = new StringBuilder($"enum {@enum.Name}");
             if (@enum.Items.Count == 0)
+            {
                 return builder.ToString();
+            }
 
             builder.AppendLine(" {");
-            foreach (var item in @enum.Items)
+            foreach (CppEnumItem? item in @enum.Items)
             {
                 builder.AppendLine($"    {item.ConstructDefinition()},");
             }
@@ -326,21 +376,23 @@ internal static class CppTypeExt
         {
             var builder = new StringBuilder($"{@class.ClassKind.ToString().ToLower()}{(@class.Name.IsWhiteSpace() ? string.Empty : $" {@class.Name}")}");
             if (@class.SizeOf == 0 || declarationOnly)
+            {
                 return builder.ToString();
+            }
 
-            var baseTypes = @class.BaseTypes;
+            List<CppBaseType> baseTypes = @class.BaseTypes;
             if (baseTypes.Count != 0)
             {
                 builder.Append(" : ");
                 for (int i = baseTypes.Count - 1; i >= 0; --i)
                 {
-                    var typeOfBaseType = baseTypes[i].Type;
+                    CppType typeOfBaseType = baseTypes[i].Type;
                     builder.Append($"{(typeOfBaseType is CppPrimitiveType pType ? MapPrimitiveType(pType) : typeOfBaseType.TypeName)}{(i != 0 ? ',' : string.Empty)}");
                 }
             }
 
             builder.AppendLine(" {");
-            foreach (var child in @class.Children())
+            foreach (ICppDeclaration? child in @class.Children())
             {
                 if (child is CppTypeDeclaration typeDeclaration)
                 {
@@ -366,7 +418,9 @@ internal static class CppTypeExt
         public string ConstructDefinition()
         {
             if (attribute.Name.StartsWith("alignas"))
+            {
                 return "alignas(8)";
+            }
 
             return attribute.ToString();
         }
@@ -377,7 +431,7 @@ internal static class CppTypeExt
 
         public bool ContainsType(string typeName)
         {
-            var target = declarations.Find(declaration => declaration.IsSameType(typeName));
+            T? target = declarations.Find(declaration => declaration.IsSameType(typeName));
             return target is not null && declarations.ContainsType(target);
         }
 
@@ -386,29 +440,34 @@ internal static class CppTypeExt
             return declarations.Find(declaration => declaration.IsSameType(cppType)) is not null;
         }
 
-        public ref T TryFindType(string typeName)
+        public ref T TryFindType(string typeName, bool relax = false)
         {
             if (GlobalConfig.RemappedTypes.TryGetValue(typeName, out string? value))
+            {
                 typeName = value;
+            }
 
-            var rawData = CollectionsMarshal.AsSpan(declarations);
+            Span<T> rawData = CollectionsMarshal.AsSpan(declarations);
             for (int i = rawData.Length - 1; i >= 0; --i)
             {
-                ref var target = ref rawData[i];
-                if (target.IsSameType(typeName))
+                ref T target = ref rawData[i];
+                if (target.IsSameType(typeName, relax))
+                {
                     return ref target!;
+                }
             }
 
             return ref Unsafe.NullRef<T>();
         }
 
-        public ref T TryFindType(CppType cppType)
+        public ref T TryFindType(CppType cppType, bool relax = false)
         {
-            var rawData = CollectionsMarshal.AsSpan(declarations);
-            var index = rawData.IndexOf([cppType], new CppTypeComparer());
+            Span<T> rawData = CollectionsMarshal.AsSpan(declarations);
+            int index = rawData.IndexOf([cppType], relax ? RelaxedTypeComparer : DefaultTypeComparer);
             if (index == -1)
+            {
                 return ref Unsafe.NullRef<T>();
-
+            }
 
             return ref rawData[index];
         }
@@ -425,27 +484,43 @@ internal static class CppTypeExt
         public int Compare(CppElement? x, CppElement? y)
         {
             if (x == null || y == null)
+            {
                 throw new InvalidOperationException();
+            }
+
             if (x.SourceFile != y.SourceFile && ThrowIfSourceNotSame)
+            {
                 throw new InvalidOperationException();
+            }
 
             int offsetLeft = x.Span.Start.Offset, offsetRight = y.Span.Start.Offset;
             if (offsetLeft < offsetRight)
+            {
                 return -1;
+            }
+
             if (offsetLeft > offsetRight)
+            {
                 return 1;
+            }
+
             return 0;
         }
     }
 
     private class CppTypeComparer : IEqualityComparer<CppType>
     {
+
+        public bool RelaxedComparison { get; init; } = false;
+
         public bool Equals(CppType? x, CppType? y)
         {
             if (x == null || y == null)
+            {
                 throw new InvalidOperationException();
+            }
 
-            return x.IsSameType(y);
+            return x.IsSameType(y, RelaxedComparison);
         }
 
         public int GetHashCode([DisallowNull] CppType obj)

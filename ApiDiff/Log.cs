@@ -1,6 +1,7 @@
-﻿using System.Runtime.CompilerServices;
+using System.Runtime.CompilerServices;
 
 using Windows.Win32;
+using Windows.Win32.Foundation;
 using Windows.Win32.System.Console;
 
 namespace ApiDiff;
@@ -13,8 +14,12 @@ internal static class Log
     static unsafe Log()
     {
         CONSOLE_MODE mode;
-        var handle = Native.GetStdHandle(STD_HANDLE.STD_OUTPUT_HANDLE);
-        if (!Native.GetConsoleMode(handle, &mode)) return;
+        HANDLE handle = Native.GetStdHandle(STD_HANDLE.STD_OUTPUT_HANDLE);
+        if (!Native.GetConsoleMode(handle, &mode))
+        {
+            return;
+        }
+
         Native.SetConsoleMode(handle, mode | CONSOLE_MODE.ENABLE_VIRTUAL_TERMINAL_PROCESSING);
     }
 
@@ -45,7 +50,7 @@ internal static class Log
 
     private static void WriteLog(object message, Exception? exception, string tag, [CallerMemberName] string level = "")
     {
-        var colour = level switch
+        string colour = level switch
         {
             "Error" => "1;31",
             "Warn" => "93",
@@ -54,14 +59,18 @@ internal static class Log
             "Trace" => "95",
             _ => throw new ArgumentException($"Invalid log level: {level}")
         };
-        var time = DateTimeOffset.Now.ToString("HH:mm:ss.fff");
+        string time = DateTimeOffset.Now.ToString("HH:mm:ss.fff");
         string formattedMessage = FloodColour ? $"\u001b[{colour}m[{time}][{level,5}] {tag} : {message}" : $"[{time}][\u001b[{colour}m{level,5}\u001b[0m] {tag} : {message}";
 
         if (exception is not null)
+        {
             formattedMessage = $"{formattedMessage}{Environment.NewLine}{(FloodColour ? $"\u001b[{colour}m{exception}\u001b[0m" : exception.ToString())}";
+        }
 
         if (FloodColour)
+        {
             formattedMessage = $"{formattedMessage}\u001b[0m";
+        }
 
         Console.WriteLine(formattedMessage);
     }
