@@ -11,7 +11,7 @@ namespace ApiDiff;
 internal class Differ(string InputHeader, string TargetHeader, string IncludeDir)
 {
 
-    private static readonly CppCommentText UnresolvedComment = new() { Text = "Unresolved" }, MacroIdArray = new() { Text = "DO_ARRAY_DEFINE" }, MacroIdList = new() { Text = "DO_LIST_DEFINE" };
+    private static readonly CppCommentText UnresolvedComment = new() { Text = "Unresolved" }, MacroIdArray = new() { Text = "DO_ARRAY_DEFINE" }, MacroIdArrayPtr = new() { Text = "DO_ARRAY_DEFINE_PTR" }, MacroIdList = new() { Text = "DO_LIST_DEFINE" };
 
     private readonly List<CppTypeDeclaration> _inputDeclarations = [], _targetDeclarations = [], _targetGlobalDeclarations = [];
     private readonly Dictionary<string, CppType> _prebuiltTypes = [];
@@ -64,6 +64,7 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
             targetFileContent = targetFileContent.Replace("<cstdint>", "<stdint.h>");
         }
         _macrosExpansionIndex.Add(MacroIdArray, FindAllOccurrencesMacroIndex(targetFileContent, "DO_ARRAY_DEFINE"));
+        _macrosExpansionIndex.Add(MacroIdArrayPtr, FindAllOccurrencesMacroIndex(targetFileContent, "DO_ARRAY_DEFINE_PTR"));
         _macrosExpansionIndex.Add(MacroIdList, FindAllOccurrencesMacroIndex(targetFileContent, "DO_LIST_DEFINE"));
         _targetCompilation = TryParseHeader(targetFileContent, "target", cppParserOptions);
         if (_targetCompilation.HasErrors)
@@ -132,7 +133,7 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
                 }
             }
 
-            if (originalType.Comment is { } comment && ((comment == MacroIdArray) || (comment == MacroIdList)))
+            if (originalType.Comment is { } comment && ((comment == MacroIdArray) || (comment == MacroIdArrayPtr) || (comment == MacroIdList)))
             {
                 Log.Info($"Skipping expanded {typeKind} {originalType.TypeName}.");
             }
@@ -227,7 +228,7 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
                 continue;
             }
 
-            if (MacroIdList.Equals(data.Comment) || MacroIdArray.Equals(data.Comment))
+            if (MacroIdList.Equals(data.Comment) || MacroIdArray.Equals(data.Comment) || MacroIdArrayPtr.Equals(data.Comment))
             {
                 string macroName = ((CppCommentText)data.Comment).Text;
                 string typeName = @class.Name;
@@ -744,20 +745,24 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
 
 #ifndef DO_ARRAY_DEFINE
 #define DO_ARRAY_DEFINE(E_NAME) \
-struct  E_NAME ## __Array { \
-Il2CppClass *klass; \
-MonitorData *monitor; \
+struct  E_NAME ## __Array : Il2CppObject { \
 Il2CppArrayBounds *bounds; \
 il2cpp_array_size_t max_length; \
 E_NAME vector[32]; \
 };
 #endif
+#ifndef DO_ARRAY_DEFINE_PTR
+#define DO_ARRAY_DEFINE_PTR(E_NAME) \
+struct  E_NAME ## __Array : Il2CppObject { \
+Il2CppArrayBounds *bounds; \
+il2cpp_array_size_t max_length; \
+E_NAME *vector[32]; \
+};
+#endif
 #ifndef DO_LIST_DEFINE
 #define DO_LIST_DEFINE(E_NAME) \
 DO_ARRAY_DEFINE(E_NAME) \
-struct List_1_ ## E_NAME { \
-Il2CppClass *klass; \
-MonitorData *monitor; \
+struct List_1_ ## E_NAME : Il2CppObject { \
 struct E_NAME ## __Array *_items; \
 int32_t _size; \
 int32_t _version; \
