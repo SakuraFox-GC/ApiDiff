@@ -85,8 +85,8 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
         //_inputDeclarations.AddRange([.. _inputCompilation.Typedefs, .. _inputCompilation.Enums, .. _inputCompilation.Classes]);
         _targetGlobalDeclarations.AddRange(_targetCompilation.Children().OfType<CppTypeDeclaration>());
         _targetDeclarations.AddRange(_targetGlobalDeclarations.Where(def => def.Parent is CppNamespace));
-        _inputDeclarations.SortBySourceLocation();
-        _targetDeclarations.SortBySourceLocation();
+        _inputDeclarations.SortBySourceLocation(false);
+        _targetDeclarations.SortBySourceLocation(false);
 
         foreach (CppTypeDeclaration targetDeclaration in _targetDeclarations)
         {
@@ -335,9 +335,9 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
 
         using var pinnedGCHandleForTargetContainer = new PinnedGCHandle<CppContainerList<CppField>>(targetClass.Fields);
         ref List<CppField> targetFields = ref Unsafe.AsRef<List<CppField>>(pinnedGCHandleForTargetContainer.GetAddressOfObjectData());
-        CppContainerList<CppField> inputContainer = inputClass.Fields;
+        List<CppField> inputFields = GetEffectiveInputFields(inputClass);
         List<CppField> rebuiltFields = [];
-        if ((inputContainer.Count == targetFields.Count) && (inputContainer.Sum(def => def.Type.SizeOf) == targetFields.Sum(def => def.Type.SizeOf)))
+        if ((inputFields.Count == targetFields.Count) && (inputFields.Sum(def => def.Type.SizeOf) == targetFields.Sum(def => def.Type.SizeOf)))
         {
             goto COMPARE_SAME_LENGTH;
         }
@@ -370,16 +370,16 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
             baseTypes = baseClass.BaseTypes;
         }
 
-        CppField? lastFieldInInput = inputContainer.FirstOrDefault(field => field.IsSameField(lastFieldInTarget));
-        int indexOfLastField = lastFieldInInput is null ? -1 : inputContainer.IndexOf(lastFieldInInput);
-        for (int i = inputContainer.Count - 1; i >= 0; --i)
+        CppField? lastFieldInInput = inputFields.FirstOrDefault(field => field.IsSameField(lastFieldInTarget));
+        int indexOfLastField = lastFieldInInput is null ? -1 : inputFields.IndexOf(lastFieldInInput);
+        for (int i = inputFields.Count - 1; i >= 0; --i)
         {
             if (indexOfLastField > -1 && i > indexOfLastField)
             {
                 continue;
             }
 
-            CppField inputField = inputContainer[i];
+            CppField inputField = inputFields[i];
             if (targetFields.Find(inputField.IsSameField) is CppField { } matchedField)
             {
                 CompareFieldInternal(inputField, matchedField);
@@ -402,9 +402,9 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
         goto MODIFY_AND_RETURN;
 
     COMPARE_SAME_LENGTH:
-        for (int i = inputContainer.Count - 1; i >= 0; --i)
+        for (int i = inputFields.Count - 1; i >= 0; --i)
         {
-            CppField inputField = inputContainer[i], targetField = targetFields[i];
+            CppField inputField = inputFields[i], targetField = targetFields[i];
             CompareFieldInternal(inputField, targetField);
         }
     MODIFY_AND_RETURN:
@@ -464,6 +464,38 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
         }
     }
 
+    private CppClass GetEffectiveInputClass(CppClass inputClass)
+    {
+        if (inputClass.Name.EndsWith("__Fields"))
+        {
+            return inputClass;
+        }
+
+        ref CppTypeDeclaration fieldsType = ref _inputDeclarations.TryFindType($"{inputClass.TypeName}__Fields");
+        if (Unsafe.IsNullRef(ref fieldsType) || fieldsType is not CppClass fieldsClass)
+        {
+            return inputClass;
+        }
+
+        if (inputClass.Fields.Any(field => field.Name == "fields" && field.Type.TypeName == fieldsClass.TypeName))
+        {
+            return fieldsClass;
+        }
+
+        return inputClass;
+    }
+
+    private List<CppField> GetEffectiveInputFields(CppClass inputClass)
+    {
+        CppClass effectiveClass = GetEffectiveInputClass(inputClass);
+        return effectiveClass.Fields.Where(field => !IsInspectorBaseField(field)).ToList();
+    }
+
+    private static bool IsInspectorBaseField(CppField field)
+    {
+        return field.Name == "_" && field.Type.TypeName.EndsWith("__Fields");
+    }
+
     private unsafe bool TryWalkEnum(ref CppEnum targetEnum)
     {
         ref CppTypeDeclaration inputType = ref _inputDeclarations.TryFindType(targetEnum);
@@ -512,8 +544,12 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
         if (type is CppPointerType cppPointer)
         {
             CppType eType = cppPointer.FindPointerBaseType(out _);
-            ref CppTypeDeclaration resolvedEType = ref _targetGlobalDeclarations.TryFindType(eType); // try to find the very first base type
-            if (Unsafe.IsNullRef(ref resolvedEType))
+            ref CppTypeDeclaration resolvedEType = ref TryFindTargetType(eType); // try to find the very first base type
+            if (!Unsafe.IsNullRef(ref resolvedEType))
+            {
+                return true;
+            }
+            else
             {
                 return TryWalkTypeHierarchy(@base, ref type);                                               // if not, remap type
             }
@@ -532,7 +568,7 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
             return true;
         }
 
-        ref CppTypeDeclaration resolvedType = ref _targetGlobalDeclarations.TryFindType(type);
+        ref CppTypeDeclaration resolvedType = ref TryFindTargetType(type);
         if (!Unsafe.IsNullRef(ref resolvedType))
         {
             return true;
@@ -596,10 +632,16 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
 
     private unsafe void TryWalkClassFieldsNew(CppTypeDeclaration @base, ref CppClass @class)
     {
-        using var pinnedGCHandleForClassContainer = new PinnedGCHandle<CppContainerList<CppField>>(@class.Fields);
+        CppClass effectiveClass = GetEffectiveInputClass(@class);
+        using var pinnedGCHandleForClassContainer = new PinnedGCHandle<CppContainerList<CppField>>(effectiveClass.Fields);
         ref List<CppField> targetFields = ref Unsafe.AsRef<List<CppField>>(pinnedGCHandleForClassContainer.GetAddressOfObjectData());
         foreach (ref CppField field in CollectionsMarshal.AsSpan(targetFields))
         {
+            if (IsInspectorBaseField(field))
+            {
+                continue;
+            }
+
             ref CppType fieldType = ref FieldTypeAsRef(field);
 
             if (!fieldType.IsPointerType)
@@ -628,7 +670,7 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
     {
         string typeName = type.TypeName;
         bool isGeneric = type.IsGenericType;
-        ref CppTypeDeclaration resolvedTargetType = ref _targetGlobalDeclarations.TryFindType(typeName);
+        ref CppTypeDeclaration resolvedTargetType = ref TryFindTargetType(typeName);
         bool resolvedInMap = false;
         foreach ((CppTypeDeclaration _, List<CppType>? insertionList) in _insertionMap)
         {
@@ -663,6 +705,28 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
             RemapType(ref type, _prebuiltTypes["Il2CppObject"]);
         }
         return true;
+    }
+
+    private ref CppTypeDeclaration TryFindTargetType(CppType type)
+    {
+        ref CppTypeDeclaration resolvedType = ref _targetDeclarations.TryFindType(type);
+        if (!Unsafe.IsNullRef(ref resolvedType))
+        {
+            return ref resolvedType;
+        }
+
+        return ref _targetGlobalDeclarations.TryFindType(type);
+    }
+
+    private ref CppTypeDeclaration TryFindTargetType(string typeName)
+    {
+        ref CppTypeDeclaration resolvedType = ref _targetDeclarations.TryFindType(typeName);
+        if (!Unsafe.IsNullRef(ref resolvedType))
+        {
+            return ref resolvedType;
+        }
+
+        return ref _targetGlobalDeclarations.TryFindType(typeName);
     }
 
     private static unsafe bool TryRefineFieldTypeFirstPass(ref CppField field)

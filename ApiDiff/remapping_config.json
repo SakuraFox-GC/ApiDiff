@@ -1,0 +1,37 @@
+{
+  "KnownNames": [
+    "VirtualInvokeData",
+    "Il2CppRGCTXData",
+    "Il2CppClass",
+    "Il2CppClass_0",
+    "Il2CppClass_1",
+    "String",
+    "Action",
+    "Vector2",
+    "Vector3",
+    "Il2CppArrayBounds",
+    "Il2CppObject",
+    "Il2CppArray",
+    "MethodInfo"
+  ],
+  "LastBuiltInTypeName": "Il2CppArrayBounds",
+  "KnownReservedSuffixes": {
+    "__Array": "Il2CppArray",
+    "__Class": "Il2CppClass",
+    "__Boxed": "Il2CppObject",
+    "__StaticFields": "Il2CppObject",
+    "__Fields": "Il2CppObject"
+  },
+  "RemappedTypes": {
+    "Direction__Enum": "SharedConsts_Direction__Enum",
+    "CancelReasonMask__Enum": "Modifier_CancelReasonMask__Enum",
+    "SourceAttackType__Enum": "Modifier_SourceAttackType__Enum",
+    "FinishReason__Enum": "Entity_FinishReason__Enum",
+    "ActionTargetType__Enum": "Nodes_ActionTargetType__Enum",
+    "SourceType__Enum": "ActionNode_SourceType__Enum",
+    "ExecuteCondition__Enum": "ActionNode_ExecuteCondition__Enum",
+    "Event__Enum": "Entity_Event__Enum",
+    "HighlightType__Enum": "TileGraphic_HighlightType__Enum",
+    "UIStateEnum__Enum": "UIController_UIStateEnum__Enum"
+  }
+}
