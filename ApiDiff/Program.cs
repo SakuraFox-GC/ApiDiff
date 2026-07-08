@@ -18,6 +18,7 @@ namespace ApiDiff
             SetUnhandledExceptionHandler(null, OnUnhandledException);
 
             string inputHeader = args[0], targetHeader = args[1], includeDir = args[2];
+            bool applyWithoutPrompt = args.Length > 3 && args[3] is "--yes" or "-y";
             if (!File.Exists(inputHeader))
             {
                 throw new FileNotFoundException("InputHeaderFilePath not exists.", inputHeader);
@@ -45,19 +46,22 @@ namespace ApiDiff
             Log.FloodColour = false;
             string generatedHeader = headerDiffer.ConstructDefinitions();
             Log.FloodColour = true;
-            Log.Info($@"
+            if (!applyWithoutPrompt)
+            {
+                Log.Info($@"
 Construction all done! Press any key to apply the changes to the target header
 
   Target Header File:
     {targetHeader}", null, nameof(headerDiffer.ConstructDefinitions));
-            Console.ReadKey(true);
+                Console.ReadKey(true);
+            }
             File.WriteAllText(targetHeader, generatedHeader);
         }
 
         private static void PrintHelp()
         {
             Console.WriteLine(@"Usage:
-  ApiDiff.exe <InputHeaderFilePath> <TargetHeaderFilePath> <AndroidNDKSysrootIncludeDir>
+  ApiDiff.exe <InputHeaderFilePath> <TargetHeaderFilePath> <AndroidNDKSysrootIncludeDir> [--yes]
 
 Description:
   This little programme expects exactly three arguments:
@@ -68,7 +72,8 @@ Description:
 
 Notes:
   - Wrap paths with spaces in quotes.
-  - The arguments must be provided in the correct order, otherwise the programme will be proper baffled.");
+  - The arguments must be provided in the correct order, otherwise the programme will be proper baffled.
+  - Pass --yes or -y to write the generated header without an interactive confirmation.");
             Console.ReadKey(true);
         }
 

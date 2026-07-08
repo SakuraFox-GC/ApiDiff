@@ -25,6 +25,10 @@
     </PackageReference>
   </ItemGroup>
 
+  <ItemGroup>
+    <Content Include="remapping_config.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
   <PropertyGroup Condition="$(_IsPublishing) == 'true' and $(Configuration) == 'Release'">
     <DebuggerSupport>false</DebuggerSupport>
     <StackTraceSupport>false</StackTraceSupport>
