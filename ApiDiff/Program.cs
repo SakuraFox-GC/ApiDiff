@@ -61,14 +61,14 @@ Construction all done! Press any key to apply the changes to the target header
         private static void PrintHelp()
         {
             Console.WriteLine(@"Usage:
-  ApiDiff.exe <InputHeaderFilePath> <TargetHeaderFilePath> <AndroidNDKSysrootIncludeDir> [--yes]
+  ApiDiff.exe <InputHeaderFilePath> <TargetHeaderFilePath> <RequiredIncludeDir> [--yes]
 
 Description:
   This little programme expects exactly three arguments:
   
     1. Input Header File – a proper path to your C++ header file.
     2. Target Header File – a path to the header file where the output will be written. Mind that this file may get overwritten.
-    3. Android NDK Sysroot Include Directory – the path to the include directory in your Android NDK sysroot.
+    3. Required Include Directory – the path to the required include directory in your system, path to Android NDK Sysroot include directory and Windows SDK Root are supported.
 
 Notes:
   - Wrap paths with spaces in quotes.
