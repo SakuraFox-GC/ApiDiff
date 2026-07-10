@@ -6,6 +6,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Features>runtime-async=on</Features>
     <EnablePreviewFeatures>true</EnablePreviewFeatures>
     <LangVersion>preview</LangVersion>
     <ApplicationIcon>brand.ico</ApplicationIcon>
@@ -19,7 +20,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\deps\CppAst.NET\src\CppAst\CppAst.csproj" />
-    <PackageReference Include="Microsoft.Windows.CsWin32" Version="0.3.299">
+    <PackageReference Include="Microsoft.Windows.CsWin32" Version="0.3.300">
       <PrivateAssets>all</PrivateAssets>
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
     </PackageReference>
