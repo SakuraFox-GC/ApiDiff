@@ -109,7 +109,10 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
             LoadPrebuiltType(knownName);
         }
 
-        _targetDeclarations.RemoveAll(def => def.SizeOf == 0);
+        // Incomplete enums are intentional opaque declarations in Sakura.Core. Their
+        // size is reported as zero by clang, but dropping them makes fields that use
+        // the enum impossible to declare. Zero-sized classes are still unusable here.
+        _targetDeclarations.RemoveAll(def => def is CppClass && def.SizeOf == 0);
         Span<CppTypeDeclaration> rawData = CollectionsMarshal.AsSpan(_targetDeclarations);
         for (int i = rawData.Length - 1; i >= 0; --i)
         {
@@ -124,8 +127,16 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
                     continue;
                 }
             }
-            else if (originalType is CppEnum)
+            else if (originalType is CppEnum cppEnum)
             {
+                // An enum without items is a deliberately opaque enum. Keep its
+                // declaration instead of replacing it with Inspector's full enum.
+                if (cppEnum.Items.Count == 0)
+                {
+                    Log.Info($"Keeping opaque enum {originalType.TypeName}.");
+                    continue;
+                }
+
                 if (TryWalkEnum(ref Unsafe.As<CppTypeDeclaration, CppEnum>(ref originalType)))
                 {
                     Log.Info($"{typeKind} {originalType.TypeName} resolved successfully.");
@@ -335,60 +346,20 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
 
         using var pinnedGCHandleForTargetContainer = new PinnedGCHandle<CppContainerList<CppField>>(targetClass.Fields);
         ref List<CppField> targetFields = ref Unsafe.AsRef<List<CppField>>(pinnedGCHandleForTargetContainer.GetAddressOfObjectData());
-        List<CppField> inputFields = GetEffectiveInputFields(inputClass);
+        List<CppField> inputFields = GetEffectiveInputFields(inputClass, targetClass);
         List<CppField> rebuiltFields = [];
         if ((inputFields.Count == targetFields.Count) && (inputFields.Sum(def => def.Type.SizeOf) == targetFields.Sum(def => def.Type.SizeOf)))
         {
             goto COMPARE_SAME_LENGTH;
         }
 
-        if (targetFields.Count == 0)
-        {
-            goto MODIFY_AND_RETURN;
-        }
-
-        CppField lastFieldInTarget = targetFields[^1];
-        var targetBaseFields = new List<CppField>();
-        List<CppBaseType> baseTypes = targetClass.BaseTypes;
-        while (baseTypes is List<CppBaseType> { Count: > 0 })
-        {
-            var baseClass = (CppClass)baseTypes[0].Type;
-            if (TryWalkClassFieldsUpdate(ref baseClass))
-            {
-                for (int i = baseClass.Fields.Count - 1; i >= 0; --i)
-                {
-                    CppField baseField = baseClass.Fields[i];
-                    if (targetBaseFields.Any(def => def.Name == baseField.Name))
-                    {
-                        continue;
-                    }
-
-                    targetBaseFields.Add(baseField);
-                }
-            }
-
-            baseTypes = baseClass.BaseTypes;
-        }
-
-        CppField? lastFieldInInput = inputFields.FirstOrDefault(field => field.IsSameField(lastFieldInTarget));
-        int indexOfLastField = lastFieldInInput is null ? -1 : inputFields.IndexOf(lastFieldInInput);
         for (int i = inputFields.Count - 1; i >= 0; --i)
         {
-            if (indexOfLastField > -1 && i > indexOfLastField)
-            {
-                continue;
-            }
-
             CppField inputField = inputFields[i];
             if (targetFields.Find(inputField.IsSameField) is CppField { } matchedField)
             {
                 CompareFieldInternal(inputField, matchedField);
                 continue;
-            }
-
-            if (targetBaseFields.Find(inputField.IsSameField) is CppField { })
-            {
-                break;
             }
 
             if (!TryUpdateField(targetClass, ref inputField))
@@ -485,16 +456,113 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
         return inputClass;
     }
 
-    private List<CppField> GetEffectiveInputFields(CppClass inputClass)
+    private List<CppField> GetEffectiveInputFields(CppClass inputClass, CppClass targetClass)
     {
-        CppClass effectiveClass = GetEffectiveInputClass(inputClass);
-        return effectiveClass.Fields.Where(field => !IsInspectorBaseField(field)).ToList();
+        List<InputClassLayer> hierarchy = GetInputClassHierarchy(inputClass);
+        string? targetBaseName = targetClass.BaseTypes.FirstOrDefault()?.Type.TypeName;
+        int stopIndex = targetBaseName is null
+            ? hierarchy.Count
+            : hierarchy.FindIndex(layer => layer.LogicalName == targetBaseName);
+
+        if (stopIndex < 0)
+        {
+            stopIndex = hierarchy.Count;
+            if (targetBaseName != "Il2CppObject")
+            {
+                Log.Warn($"Can not find target base {targetBaseName} in Inspector hierarchy of {inputClass.TypeName}; using the complete input hierarchy.");
+            }
+        }
+
+        var fields = new List<CppField>();
+        for (int i = stopIndex - 1; i >= 0; --i)
+        {
+            fields.AddRange(hierarchy[i].StorageClass.Fields.Where(field => !IsInspectorBaseField(field)));
+        }
+
+        return fields;
     }
 
     private static bool IsInspectorBaseField(CppField field)
     {
         return field.Name == "_" && field.Type.TypeName.EndsWith("__Fields");
     }
+
+    private List<InputClassLayer> GetInputClassHierarchy(CppClass inputClass)
+    {
+        var hierarchy = new List<InputClassLayer>();
+        var visited = new HashSet<string>();
+        bool cycleDetected = false;
+        string logicalName = inputClass.Name.EndsWith("__Fields")
+            ? inputClass.TypeName[..^8]
+            : inputClass.TypeName;
+        CppClass storageClass = GetEffectiveInputClass(inputClass);
+
+        while (true)
+        {
+            if (!visited.Add(storageClass.TypeName))
+            {
+                cycleDetected = true;
+                break;
+            }
+
+            hierarchy.Add(new(logicalName, storageClass));
+
+            CppField? inspectorBase = storageClass.Fields.FirstOrDefault(IsInspectorBaseField);
+            if (inspectorBase is not null)
+            {
+                ref CppTypeDeclaration baseFieldsType = ref _inputDeclarations.TryFindType(inspectorBase.Type.TypeName);
+                if (Unsafe.IsNullRef(ref baseFieldsType) || baseFieldsType is not CppClass baseFieldsClass)
+                {
+                    break;
+                }
+
+                storageClass = baseFieldsClass;
+                logicalName = baseFieldsClass.TypeName[..^8];
+                continue;
+            }
+
+            ref CppTypeDeclaration logicalType = ref _inputDeclarations.TryFindType(logicalName);
+            CppClass? logicalClass = !Unsafe.IsNullRef(ref logicalType) && logicalType is CppClass resolvedLogicalClass
+                ? resolvedLogicalClass
+                : null;
+            if (logicalClass?.BaseTypes.FirstOrDefault()?.Type is not CppClass baseClass)
+            {
+                break;
+            }
+
+            logicalName = baseClass.TypeName;
+            storageClass = GetEffectiveInputClass(baseClass);
+        }
+
+        if (cycleDetected)
+        {
+            Log.Warn($"Detected a cycle in Inspector hierarchy of {inputClass.TypeName}.");
+        }
+
+        return hierarchy;
+    }
+
+    private CppTypeDeclaration? FindNearestTargetAncestor(string inputTypeName)
+    {
+        ref CppTypeDeclaration inputType = ref _inputDeclarations.TryFindType(inputTypeName);
+        if (Unsafe.IsNullRef(ref inputType) || inputType is not CppClass inputClass)
+        {
+            return null;
+        }
+
+        foreach (InputClassLayer layer in GetInputClassHierarchy(inputClass).Skip(1))
+        {
+            ref CppTypeDeclaration targetAncestor = ref TryFindTargetType(layer.LogicalName);
+            if (!Unsafe.IsNullRef(ref targetAncestor))
+            {
+                return targetAncestor;
+            }
+        }
+
+        return null;
+    }
+
+    private readonly record struct InputClassLayer(string LogicalName, CppClass StorageClass);
 
     private unsafe bool TryWalkEnum(ref CppEnum targetEnum)
     {
@@ -700,6 +768,12 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
                     RemapType(ref type, builtInActionType);
                     return true;
                 }
+            }
+
+            if (FindNearestTargetAncestor(typeName) is CppTypeDeclaration nearestTargetAncestor)
+            {
+                RemapType(ref type, nearestTargetAncestor);
+                return true;
             }
 
             RemapType(ref type, _prebuiltTypes["Il2CppObject"]);
