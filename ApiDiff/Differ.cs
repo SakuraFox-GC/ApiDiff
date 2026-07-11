@@ -14,17 +14,24 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
     private static readonly CppCommentText UnresolvedComment = new() { Text = "Unresolved" }, MacroIdArray = new() { Text = "DO_ARRAY_DEFINE" }, MacroIdArrayPtr = new() { Text = "DO_ARRAY_DEFINE_PTR" }, MacroIdList = new() { Text = "DO_LIST_DEFINE" };
 
     private readonly List<CppTypeDeclaration> _inputDeclarations = [], _targetDeclarations = [], _targetGlobalDeclarations = [];
+    private CppTypeLookup<CppTypeDeclaration> _inputTypeLookup = null!, _targetTypeLookup = null!, _targetGlobalTypeLookup = null!;
     private readonly Dictionary<string, CppType> _prebuiltTypes = [];
     private readonly List<CppType> _insertedTypes = [];
     private readonly Dictionary<CppTypeDeclaration, List<CppType>> _insertionMap = [];
+    private readonly Dictionary<string, List<CppType>> _insertionTypesByName = new(StringComparer.Ordinal);
     private readonly Dictionary<CppCommentText, List<int>> _macrosExpansionIndex = [];
     private HashSet<string> _targetIncludes = [];
     private readonly HashSet<string> _walkedClasses = [];
+    private readonly Dictionary<CppClass, CppClass> _effectiveInputClassCache = new(ReferenceEqualityComparer.Instance);
+    private readonly Dictionary<CppClass, InputClassLayer[]> _inputClassHierarchyCache = new(ReferenceEqualityComparer.Instance);
+    private readonly Dictionary<string, CppTypeDeclaration?> _nearestTargetAncestorCache = new(StringComparer.Ordinal);
+    private long _effectiveInputClassCacheHits, _inputClassHierarchyCacheHits, _nearestTargetAncestorCacheHits;
     private CppCompilation? _inputCompilation, _targetCompilation;
     private bool _typeSystemWalked = false;
 
     public bool BuildTypeModel()
     {
+        long buildStarted = Stopwatch.GetTimestamp();
         if (_typeSystemWalked)
         {
             return false;
@@ -52,7 +59,9 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
             cppParserOptions.SystemIncludeFolders.Add(sysRootInclude.FullName);
         }
 
+        long inputParseStarted = Stopwatch.GetTimestamp();
         _inputCompilation = TryParseHeader(File.ReadAllText(InputHeader), "input", cppParserOptions);
+        Log.Info($"Performance: input parse {Stopwatch.GetElapsedTime(inputParseStarted).TotalSeconds:F3}s.");
         if (_inputCompilation.HasErrors)
         {
             return false;
@@ -66,7 +75,9 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
         _macrosExpansionIndex.Add(MacroIdArray, FindAllOccurrencesMacroIndex(targetFileContent, "DO_ARRAY_DEFINE"));
         _macrosExpansionIndex.Add(MacroIdArrayPtr, FindAllOccurrencesMacroIndex(targetFileContent, "DO_ARRAY_DEFINE_PTR"));
         _macrosExpansionIndex.Add(MacroIdList, FindAllOccurrencesMacroIndex(targetFileContent, "DO_LIST_DEFINE"));
+        long targetParseStarted = Stopwatch.GetTimestamp();
         _targetCompilation = TryParseHeader(targetFileContent, "target", cppParserOptions);
+        Log.Info($"Performance: target parse {Stopwatch.GetElapsedTime(targetParseStarted).TotalSeconds:F3}s.");
         if (_targetCompilation.HasErrors)
         {
             return false;
@@ -87,6 +98,9 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
         _targetDeclarations.AddRange(_targetGlobalDeclarations.Where(def => def.Parent is CppNamespace));
         _inputDeclarations.SortBySourceLocation(false);
         _targetDeclarations.SortBySourceLocation(false);
+        long inputIndexStarted = Stopwatch.GetTimestamp();
+        _inputTypeLookup = new(_inputDeclarations);
+        Log.Info($"Performance: input lookup index {Stopwatch.GetElapsedTime(inputIndexStarted).TotalSeconds:F3}s.");
 
         foreach (CppTypeDeclaration targetDeclaration in _targetDeclarations)
         {
@@ -113,6 +127,11 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
         // size is reported as zero by clang, but dropping them makes fields that use
         // the enum impossible to declare. Zero-sized classes are still unusable here.
         _targetDeclarations.RemoveAll(def => def is CppClass && def.SizeOf == 0);
+        long targetIndexStarted = Stopwatch.GetTimestamp();
+        _targetTypeLookup = new(_targetDeclarations);
+        _targetGlobalTypeLookup = new(_targetGlobalDeclarations);
+        Log.Info($"Performance: target lookup indexes {Stopwatch.GetElapsedTime(targetIndexStarted).TotalSeconds:F3}s.");
+        long walkStarted = Stopwatch.GetTimestamp();
         Span<CppTypeDeclaration> rawData = CollectionsMarshal.AsSpan(_targetDeclarations);
         for (int i = rawData.Length - 1; i >= 0; --i)
         {
@@ -155,6 +174,8 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
             }
         }
 
+        Log.Info($"Performance: declaration processing {Stopwatch.GetElapsedTime(walkStarted).TotalSeconds:F3}s.");
+        long dedupeStarted = Stopwatch.GetTimestamp();
         foreach (ref CppTypeDeclaration targetType in rawData)
         {
             ref List<CppType> insertionList = ref CollectionsMarshal.GetValueRefOrNullRef(_insertionMap, targetType);
@@ -181,12 +202,19 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
             }
         }
 
+        Log.Info($"Performance: insertion dedupe {Stopwatch.GetElapsedTime(dedupeStarted).TotalSeconds:F3}s.");
+        Log.Info($"Performance: lookup input={_inputTypeLookup.ExactHits} hit/{_inputTypeLookup.ExactMisses} miss/{_inputTypeLookup.RelaxedQueries} relaxed, " +
+            $"target={_targetTypeLookup.ExactHits} hit/{_targetTypeLookup.ExactMisses} miss, global={_targetGlobalTypeLookup.ExactHits} hit/{_targetGlobalTypeLookup.ExactMisses} miss.");
+        Log.Info($"Performance: cache hits effective={_effectiveInputClassCacheHits}, hierarchy={_inputClassHierarchyCacheHits}, ancestor={_nearestTargetAncestorCacheHits}; " +
+            $"cache entries effective={_effectiveInputClassCache.Count}, hierarchy={_inputClassHierarchyCache.Count}, ancestor={_nearestTargetAncestorCache.Count}.");
         _typeSystemWalked = true;
+        Log.Info($"Performance: model build total {Stopwatch.GetElapsedTime(buildStarted).TotalSeconds:F3}s.");
         return true;
     }
 
     public string ConstructDefinitions()
     {
+        long constructStarted = Stopwatch.GetTimestamp();
         if (!_typeSystemWalked)
         {
             Log.FloodColour = true;
@@ -276,7 +304,9 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
         }
         headerBuilder.AppendLine("}");
 
-        return headerBuilder.ToString();
+        string result = headerBuilder.ToString();
+        Log.Info($"Performance: construct definitions {Stopwatch.GetElapsedTime(constructStarted).TotalSeconds:F3}s.");
+        return result;
     }
 
     private static CppCompilation TryParseHeader(string content, string name, CppParserOptions parserOptions)
@@ -310,7 +340,7 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
             return value as CppTypeDeclaration;
         }
 
-        ref CppTypeDeclaration requiredType = ref _inputDeclarations.TryFindType(typeName);
+        ref CppTypeDeclaration requiredType = ref _inputTypeLookup.Find(typeName);
         if (Unsafe.IsNullRef(ref requiredType))
         {
             Log.Warn($"Can not load prebuilt type {typeName}, maybe it's a dummy type?");
@@ -328,11 +358,11 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
             return true;
         }
 
-        ref CppTypeDeclaration inputType = ref _inputDeclarations.TryFindType(targetClass);
+        ref CppTypeDeclaration inputType = ref _inputTypeLookup.Find(targetClass);
         if (Unsafe.IsNullRef(ref inputType))
         {
             Log.Warn($"Can not find type {targetClass.TypeName}, use relaxed mode.");
-            inputType = ref _inputDeclarations.TryFindType(targetClass, true);
+            inputType = ref _inputTypeLookup.Find(targetClass, true);
             if (Unsafe.IsNullRef(ref inputType))
             {
                 return false;
@@ -437,32 +467,51 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
 
     private CppClass GetEffectiveInputClass(CppClass inputClass)
     {
-        if (inputClass.Name.EndsWith("__Fields"))
+        if (_effectiveInputClassCache.TryGetValue(inputClass, out CppClass? cachedClass))
         {
-            return inputClass;
+            _effectiveInputClassCacheHits++;
+            return cachedClass;
         }
 
-        ref CppTypeDeclaration fieldsType = ref _inputDeclarations.TryFindType($"{inputClass.TypeName}__Fields");
+        CppClass effectiveClass = inputClass;
+        if (inputClass.Name.EndsWith("__Fields"))
+        {
+            goto CACHE_AND_RETURN;
+        }
+
+        ref CppTypeDeclaration fieldsType = ref _inputTypeLookup.Find($"{inputClass.TypeName}__Fields");
         if (Unsafe.IsNullRef(ref fieldsType) || fieldsType is not CppClass fieldsClass)
         {
-            return inputClass;
+            goto CACHE_AND_RETURN;
         }
 
         if (inputClass.Fields.Any(field => field.Name == "fields" && field.Type.TypeName == fieldsClass.TypeName))
         {
-            return fieldsClass;
+            effectiveClass = fieldsClass;
         }
 
-        return inputClass;
+    CACHE_AND_RETURN:
+        _effectiveInputClassCache.Add(inputClass, effectiveClass);
+        return effectiveClass;
     }
 
     private List<CppField> GetEffectiveInputFields(CppClass inputClass, CppClass targetClass)
     {
-        List<InputClassLayer> hierarchy = GetInputClassHierarchy(inputClass);
+        IReadOnlyList<InputClassLayer> hierarchy = GetInputClassHierarchy(inputClass);
         string? targetBaseName = targetClass.BaseTypes.FirstOrDefault()?.Type.TypeName;
-        int stopIndex = targetBaseName is null
-            ? hierarchy.Count
-            : hierarchy.FindIndex(layer => layer.LogicalName == targetBaseName);
+        int stopIndex = hierarchy.Count;
+        if (targetBaseName is not null)
+        {
+            stopIndex = -1;
+            for (int i = 0; i < hierarchy.Count; i++)
+            {
+                if (hierarchy[i].LogicalName == targetBaseName)
+                {
+                    stopIndex = i;
+                    break;
+                }
+            }
+        }
 
         if (stopIndex < 0)
         {
@@ -487,8 +536,14 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
         return field.Name == "_" && field.Type.TypeName.EndsWith("__Fields");
     }
 
-    private List<InputClassLayer> GetInputClassHierarchy(CppClass inputClass)
+    private IReadOnlyList<InputClassLayer> GetInputClassHierarchy(CppClass inputClass)
     {
+        if (_inputClassHierarchyCache.TryGetValue(inputClass, out InputClassLayer[]? cachedHierarchy))
+        {
+            _inputClassHierarchyCacheHits++;
+            return cachedHierarchy;
+        }
+
         var hierarchy = new List<InputClassLayer>();
         var visited = new HashSet<string>();
         bool cycleDetected = false;
@@ -510,7 +565,7 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
             CppField? inspectorBase = storageClass.Fields.FirstOrDefault(IsInspectorBaseField);
             if (inspectorBase is not null)
             {
-                ref CppTypeDeclaration baseFieldsType = ref _inputDeclarations.TryFindType(inspectorBase.Type.TypeName);
+                ref CppTypeDeclaration baseFieldsType = ref _inputTypeLookup.Find(inspectorBase.Type.TypeName);
                 if (Unsafe.IsNullRef(ref baseFieldsType) || baseFieldsType is not CppClass baseFieldsClass)
                 {
                     break;
@@ -521,7 +576,7 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
                 continue;
             }
 
-            ref CppTypeDeclaration logicalType = ref _inputDeclarations.TryFindType(logicalName);
+            ref CppTypeDeclaration logicalType = ref _inputTypeLookup.Find(logicalName);
             CppClass? logicalClass = !Unsafe.IsNullRef(ref logicalType) && logicalType is CppClass resolvedLogicalClass
                 ? resolvedLogicalClass
                 : null;
@@ -539,41 +594,50 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
             Log.Warn($"Detected a cycle in Inspector hierarchy of {inputClass.TypeName}.");
         }
 
-        return hierarchy;
+        InputClassLayer[] result = [.. hierarchy];
+        _inputClassHierarchyCache.Add(inputClass, result);
+        return result;
     }
 
     private CppTypeDeclaration? FindNearestTargetAncestor(string inputTypeName)
     {
-        ref CppTypeDeclaration inputType = ref _inputDeclarations.TryFindType(inputTypeName);
-        if (Unsafe.IsNullRef(ref inputType) || inputType is not CppClass inputClass)
+        if (_nearestTargetAncestorCache.TryGetValue(inputTypeName, out CppTypeDeclaration? cachedAncestor))
         {
-            return null;
+            _nearestTargetAncestorCacheHits++;
+            return cachedAncestor;
         }
 
-        foreach (InputClassLayer layer in GetInputClassHierarchy(inputClass).Skip(1))
+        CppTypeDeclaration? result = null;
+        ref CppTypeDeclaration inputType = ref _inputTypeLookup.Find(inputTypeName);
+        if (!Unsafe.IsNullRef(ref inputType) && inputType is CppClass inputClass)
         {
-            ref CppTypeDeclaration targetAncestor = ref TryFindTargetType(layer.LogicalName);
-            if (!Unsafe.IsNullRef(ref targetAncestor))
+            foreach (InputClassLayer layer in GetInputClassHierarchy(inputClass).Skip(1))
             {
-                return targetAncestor;
+                ref CppTypeDeclaration targetAncestor = ref TryFindTargetType(layer.LogicalName);
+                if (!Unsafe.IsNullRef(ref targetAncestor))
+                {
+                    result = targetAncestor;
+                    break;
+                }
             }
         }
 
-        return null;
+        _nearestTargetAncestorCache.Add(inputTypeName, result);
+        return result;
     }
 
     private readonly record struct InputClassLayer(string LogicalName, CppClass StorageClass);
 
     private unsafe bool TryWalkEnum(ref CppEnum targetEnum)
     {
-        ref CppTypeDeclaration inputType = ref _inputDeclarations.TryFindType(targetEnum);
+        ref CppTypeDeclaration inputType = ref _inputTypeLookup.Find(targetEnum);
         if (Unsafe.IsNullRef(ref inputType))
         {
             Log.Warn($"Can not find enum {targetEnum.TypeName}, use relaxed mode.");
             string itemName = targetEnum.Items.First().Name;
             string searchName = itemName.Contains("__Enum") ? itemName[..(itemName.LastIndexOf("__Enum") + 6)] : itemName;
             Log.Warn($"Searching enum {targetEnum.TypeName} use relaxed mode.");
-            inputType = ref _inputDeclarations.TryFindType(searchName, true);
+            inputType = ref _inputTypeLookup.Find(searchName, true);
             if (Unsafe.IsNullRef(ref inputType))
             {
                 return false;
@@ -653,6 +717,7 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
             Debug.Assert(!type.HasElementType);
 
             types!.Insert(0, type);
+            AddInsertionType(type);
             return true;
         }
 
@@ -683,7 +748,7 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
         }
         else if (type is CppEnum cppEnum)
         {
-            ref CppTypeDeclaration resolvedEnumType = ref _targetDeclarations.TryFindType(cppEnum.FullName);
+            ref CppTypeDeclaration resolvedEnumType = ref _targetTypeLookup.Find(cppEnum.FullName);
             if (Unsafe.IsNullRef(ref resolvedEnumType))
             {
                 type = _prebuiltTypes["int32_t"];
@@ -739,16 +804,7 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
         string typeName = type.TypeName;
         bool isGeneric = type.IsGenericType;
         ref CppTypeDeclaration resolvedTargetType = ref TryFindTargetType(typeName);
-        bool resolvedInMap = false;
-        foreach ((CppTypeDeclaration _, List<CppType>? insertionList) in _insertionMap)
-        {
-            ref CppType insertedMatched = ref insertionList.TryFindType(typeName);
-            if (!Unsafe.IsNullRef(ref insertedMatched))
-            {
-                resolvedInMap = true;
-                break;
-            }
-        }
+        bool resolvedInMap = ContainsInsertionType(typeName);
         if (Unsafe.IsNullRef(ref resolvedTargetType) && !resolvedInMap)
         {
             if (CppTypeExt.GlobalConfig.KnownReservedSuffixesFast.Find(suffix => typeName.EndsWith(suffix)) is string { } matched)
@@ -781,26 +837,46 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
         return true;
     }
 
+    private void AddInsertionType(CppType type)
+    {
+        string key = CppTypeExt.GetLookupKey(type);
+        ref List<CppType>? candidates = ref CollectionsMarshal.GetValueRefOrAddDefault(_insertionTypesByName, key, out bool exists);
+        if (!exists)
+        {
+            candidates = [];
+        }
+
+        candidates!.Add(type);
+    }
+
+    private bool ContainsInsertionType(string typeName)
+    {
+        string remappedName = CppTypeExt.RemapLookupTypeName(typeName);
+        string key = CppTypeExt.GetLookupKey(remappedName, false);
+        return _insertionTypesByName.TryGetValue(key, out List<CppType>? candidates)
+            && candidates.Exists(candidate => candidate.IsSameType(remappedName));
+    }
+
     private ref CppTypeDeclaration TryFindTargetType(CppType type)
     {
-        ref CppTypeDeclaration resolvedType = ref _targetDeclarations.TryFindType(type);
+        ref CppTypeDeclaration resolvedType = ref _targetTypeLookup.Find(type);
         if (!Unsafe.IsNullRef(ref resolvedType))
         {
             return ref resolvedType;
         }
 
-        return ref _targetGlobalDeclarations.TryFindType(type);
+        return ref _targetGlobalTypeLookup.Find(type);
     }
 
     private ref CppTypeDeclaration TryFindTargetType(string typeName)
     {
-        ref CppTypeDeclaration resolvedType = ref _targetDeclarations.TryFindType(typeName);
+        ref CppTypeDeclaration resolvedType = ref _targetTypeLookup.Find(typeName);
         if (!Unsafe.IsNullRef(ref resolvedType))
         {
             return ref resolvedType;
         }
 
-        return ref _targetGlobalDeclarations.TryFindType(typeName);
+        return ref _targetGlobalTypeLookup.Find(typeName);
     }
 
     private static unsafe bool TryRefineFieldTypeFirstPass(ref CppField field)
