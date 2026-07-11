@@ -19,6 +19,9 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
     private readonly List<CppType> _insertedTypes = [];
     private readonly Dictionary<CppTypeDeclaration, List<CppType>> _insertionMap = [];
     private readonly Dictionary<string, List<CppType>> _insertionTypesByName = new(StringComparer.Ordinal);
+    private readonly Dictionary<CppTypeDeclaration, List<ArrayDefinition>> _arrayDefinitionsByElementType = [];
+    private readonly Dictionary<string, PointerArrayDefinition> _pointerArrayDefinitionsByName = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _definedArrayTypes = new(StringComparer.Ordinal);
     private readonly Dictionary<CppCommentText, List<int>> _macrosExpansionIndex = [];
     private HashSet<string> _targetIncludes = [];
     private readonly HashSet<string> _walkedClasses = [];
@@ -242,13 +245,19 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
         {
             headerBuilder.AppendLine($"{def.ConstructDefinition()};");
             headerBuilder.AppendLine();
+            if (def is CppTypeDeclaration declaration)
+            {
+                AppendArrayDefinitions(headerBuilder, declaration);
+            }
         }
         headerBuilder.AppendLine("namespace app {");
         headerBuilder.AppendLine();
+        var emittedPointerArrays = new HashSet<string>(StringComparer.Ordinal);
         foreach (CppEnum @enum in _targetDeclarations.OfType<CppEnum>())
         {
             headerBuilder.AppendLine($"{@enum.ConstructDefinition()};");
             headerBuilder.AppendLine();
+            AppendArrayDefinitions(headerBuilder, @enum);
         }
         foreach (CppEnum insertedEnum in _insertedTypes.OfType<CppEnum>())
         {
@@ -266,6 +275,8 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
             {
                 continue;
             }
+
+            AppendPointerArrayDefinitions(headerBuilder, data, emittedPointerArrays);
 
             if (MacroIdList.Equals(data.Comment) || MacroIdArray.Equals(data.Comment) || MacroIdArrayPtr.Equals(data.Comment))
             {
@@ -287,6 +298,7 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
 
                 headerBuilder.AppendLine($"{macroName}({typeName})");
                 headerBuilder.AppendLine();
+                AppendArrayDefinitions(headerBuilder, data);
                 continue;
             }
 
@@ -301,12 +313,42 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
             }
             headerBuilder.AppendLine($"{@class.ConstructDefinition()};");
             headerBuilder.AppendLine();
+            AppendArrayDefinitions(headerBuilder, data);
         }
         headerBuilder.AppendLine("}");
 
         string result = headerBuilder.ToString();
         Log.Info($"Performance: construct definitions {Stopwatch.GetElapsedTime(constructStarted).TotalSeconds:F3}s.");
         return result;
+    }
+
+    private void AppendArrayDefinitions(StringBuilder builder, CppTypeDeclaration elementType)
+    {
+        if (!_arrayDefinitionsByElementType.TryGetValue(elementType, out List<ArrayDefinition>? definitions))
+        {
+            return;
+        }
+
+        foreach (ArrayDefinition definition in definitions)
+        {
+            builder.AppendLine($"{definition.Macro.Text}({definition.ElementTypeName})");
+            builder.AppendLine();
+        }
+    }
+
+    private void AppendPointerArrayDefinitions(StringBuilder builder, CppTypeDeclaration owner, HashSet<string> emittedArrayTypes)
+    {
+        foreach (PointerArrayDefinition definition in _pointerArrayDefinitionsByName.Values)
+        {
+            if (!definition.Owners.Contains(owner) || !emittedArrayTypes.Add(definition.ArrayTypeName))
+            {
+                continue;
+            }
+
+            builder.AppendLine($"struct {definition.ElementTypeName};");
+            builder.AppendLine($"{MacroIdArrayPtr.Text}({definition.ElementTypeName})");
+            builder.AppendLine();
+        }
     }
 
     private static CppCompilation TryParseHeader(string content, string name, CppParserOptions parserOptions)
@@ -628,6 +670,13 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
 
     private readonly record struct InputClassLayer(string LogicalName, CppClass StorageClass);
 
+    private readonly record struct ArrayDefinition(CppCommentText Macro, string ElementTypeName);
+
+    private sealed record PointerArrayDefinition(string ArrayTypeName, string ElementTypeName)
+    {
+        public HashSet<CppTypeDeclaration> Owners { get; } = new(ReferenceEqualityComparer.Instance);
+    }
+
     private unsafe bool TryWalkEnum(ref CppEnum targetEnum)
     {
         ref CppTypeDeclaration inputType = ref _inputTypeLookup.Find(targetEnum);
@@ -757,7 +806,7 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
         else if (type is CppPointerType pointerType)
         {
             ref CppType refinedType = ref ClassElementTypeAsRef(pointerType);
-            TryRefineTypeSecondPass(ref refinedType);
+            TryRefineTypeSecondPass(ref refinedType, @base);
         }
 
         return true;
@@ -792,14 +841,14 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
                 continue;
             }
 
-            if (!TryRefineTypeSecondPass(ref fieldType))
+            if (!TryRefineTypeSecondPass(ref fieldType, @base))
             {
                 field.Comment = UnresolvedComment;
             }
         }
     }
 
-    private bool TryRefineTypeSecondPass(ref CppType type)
+    private bool TryRefineTypeSecondPass(ref CppType type, CppTypeDeclaration owner)
     {
         string typeName = type.TypeName;
         bool isGeneric = type.IsGenericType;
@@ -807,7 +856,11 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
         bool resolvedInMap = ContainsInsertionType(typeName);
         if (Unsafe.IsNullRef(ref resolvedTargetType) && !resolvedInMap)
         {
-            if (CppTypeExt.GlobalConfig.KnownReservedSuffixesFast.Find(suffix => typeName.EndsWith(suffix)) is string { } matched)
+            if (TryDefineArray(owner, type))
+            {
+                return true;
+            }
+            else if (CppTypeExt.GlobalConfig.KnownReservedSuffixesFast.Find(suffix => typeName.EndsWith(suffix)) is string { } matched)
             {
                 CppType remappedType = _prebuiltTypes[CppTypeExt.GlobalConfig.KnownReservedSuffixes[matched]];
                 if (remappedType is not CppEnum)
@@ -834,6 +887,56 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
 
             RemapType(ref type, _prebuiltTypes["Il2CppObject"]);
         }
+        return true;
+    }
+
+    private bool TryDefineArray(CppTypeDeclaration owner, CppType type)
+    {
+        if (type is not CppClass arrayClass || !arrayClass.TypeName.EndsWith("__Array", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        CppField? vectorField = arrayClass.Fields.FirstOrDefault(field => field.Name == "vector");
+        if (vectorField?.Type is not CppArrayType vectorType)
+        {
+            return false;
+        }
+
+        bool storesPointers = vectorType.ElementType is CppPointerType;
+        CppType elementType = storesPointers
+            ? ((CppPointerType)vectorType.ElementType).FindPointerBaseType(out _)
+            : vectorType.ElementType;
+        ref CppTypeDeclaration targetElementType = ref TryFindTargetType(elementType);
+        if (Unsafe.IsNullRef(ref targetElementType))
+        {
+            return false;
+        }
+
+        if (storesPointers && targetElementType is CppClass && !_targetGlobalDeclarations.Contains(targetElementType))
+        {
+            ref PointerArrayDefinition? definition = ref CollectionsMarshal.GetValueRefOrAddDefault(_pointerArrayDefinitionsByName, arrayClass.TypeName, out bool exists);
+            if (!exists)
+            {
+                definition = new(arrayClass.TypeName, targetElementType.TypeName);
+                Log.Debug($"Defining {arrayClass.TypeName} with {MacroIdArrayPtr.Text}({targetElementType.TypeName}).");
+            }
+
+            definition!.Owners.Add(owner);
+        }
+        else if (_definedArrayTypes.Add(arrayClass.TypeName))
+        {
+            ref List<ArrayDefinition>? definitions = ref CollectionsMarshal.GetValueRefOrAddDefault(_arrayDefinitionsByElementType, targetElementType, out bool exists);
+            if (!exists)
+            {
+                definitions = [];
+            }
+
+            CppCommentText macro = storesPointers ? MacroIdArrayPtr : MacroIdArray;
+            definitions!.Add(new(macro, targetElementType.TypeName));
+            Log.Debug($"Defining {arrayClass.TypeName} with {macro.Text}({targetElementType.TypeName}).");
+        }
+
         return true;
     }
 
