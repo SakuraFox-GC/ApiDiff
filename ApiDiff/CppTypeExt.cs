@@ -355,6 +355,14 @@ internal static class CppTypeExt
             var builder = new StringBuilder($"enum {@enum.Name}");
             if (@enum.Items.Count == 0)
             {
+                string integerType = @enum.IntegerType switch
+                {
+                    CppPrimitiveType primitive => MapPrimitiveType(primitive),
+                    CppTypedef typedef => typedef.Name,
+                    { } type => type.TypeName,
+                    null => "int32_t"
+                };
+                builder.Append($" : {integerType}");
                 return builder.ToString();
             }
 
