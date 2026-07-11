@@ -32,6 +32,7 @@
     "ExecuteCondition__Enum": "ActionNode_ExecuteCondition__Enum",
     "Event__Enum": "Entity_Event__Enum",
     "HighlightType__Enum": "TileGraphic_HighlightType__Enum",
-    "UIStateEnum__Enum": "UIController_UIStateEnum__Enum"
+    "UIStateEnum__Enum": "UIController_UIStateEnum__Enum",
+    "List_1_Torappu_ObjectPtr_1_Torappu_Battle_Entity_": "List_1_ObjectPtr_1_Torappu_Battle_Entity_"
   }
 }

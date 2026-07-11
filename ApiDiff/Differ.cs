@@ -13,6 +13,9 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
 
     private static readonly CppCommentText UnresolvedComment = new() { Text = "Unresolved" }, MacroIdArray = new() { Text = "DO_ARRAY_DEFINE" }, MacroIdArrayPtr = new() { Text = "DO_ARRAY_DEFINE_PTR" }, MacroIdList = new() { Text = "DO_LIST_DEFINE" };
 
+    private const string IgnorePushToken = "apidiff push ignore", IgnorePopToken = "apidiff pop ignore";
+    private const string IgnorePushMarker = "#pragma apidiff push ignore", IgnorePopMarker = "#pragma apidiff pop ignore";
+
     private readonly List<CppTypeDeclaration> _inputDeclarations = [], _targetDeclarations = [], _targetGlobalDeclarations = [];
     private CppTypeLookup<CppTypeDeclaration> _inputTypeLookup = null!, _targetTypeLookup = null!, _targetGlobalTypeLookup = null!;
     private readonly Dictionary<string, CppType> _prebuiltTypes = [];
@@ -23,6 +26,9 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
     private readonly Dictionary<string, PointerArrayDefinition> _pointerArrayDefinitionsByName = new(StringComparer.Ordinal);
     private readonly HashSet<string> _definedArrayTypes = new(StringComparer.Ordinal);
     private readonly Dictionary<CppCommentText, List<int>> _macrosExpansionIndex = [];
+    private readonly List<(int Start, int End)> _ignoreRanges = [];
+    private readonly HashSet<CppTypeDeclaration> _ignoredDeclarations = new(ReferenceEqualityComparer.Instance);
+    private readonly HashSet<CppField> _pinnedFields = new(ReferenceEqualityComparer.Instance);
     private HashSet<string> _targetIncludes = [];
     private readonly HashSet<string> _walkedClasses = [];
     private readonly Dictionary<CppClass, CppClass> _effectiveInputClassCache = new(ReferenceEqualityComparer.Instance);
@@ -78,6 +84,7 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
         _macrosExpansionIndex.Add(MacroIdArray, FindAllOccurrencesMacroIndex(targetFileContent, "DO_ARRAY_DEFINE"));
         _macrosExpansionIndex.Add(MacroIdArrayPtr, FindAllOccurrencesMacroIndex(targetFileContent, "DO_ARRAY_DEFINE_PTR"));
         _macrosExpansionIndex.Add(MacroIdList, FindAllOccurrencesMacroIndex(targetFileContent, "DO_LIST_DEFINE"));
+        ComputeIgnoreRanges(targetFileContent);
         long targetParseStarted = Stopwatch.GetTimestamp();
         _targetCompilation = TryParseHeader(targetFileContent, "target", cppParserOptions);
         Log.Info($"Performance: target parse {Stopwatch.GetElapsedTime(targetParseStarted).TotalSeconds:F3}s.");
@@ -115,6 +122,11 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
                     targetDeclaration.Comment = macroID;
                 }
             }
+
+            if (_ignoreRanges.Count > 0 && IsOffsetIgnored(targetDeclaration.Span.Start.Offset))
+            {
+                _ignoredDeclarations.Add(targetDeclaration);
+            }
         }
 
         foreach (string knownName in CppTypeExt.GlobalConfig.KnownNames)
@@ -129,7 +141,7 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
         // Incomplete enums are intentional opaque declarations in Sakura.Core. Their
         // size is reported as zero by clang, but dropping them makes fields that use
         // the enum impossible to declare. Zero-sized classes are still unusable here.
-        _targetDeclarations.RemoveAll(def => def is CppClass && def.SizeOf == 0);
+        _targetDeclarations.RemoveAll(def => def is CppClass && def.SizeOf == 0 && !_ignoredDeclarations.Contains(def));
         long targetIndexStarted = Stopwatch.GetTimestamp();
         _targetTypeLookup = new(_targetDeclarations);
         _targetGlobalTypeLookup = new(_targetGlobalDeclarations);
@@ -140,6 +152,12 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
         {
             ref CppTypeDeclaration originalType = ref rawData[i];
             string typeKind = originalType.TypeKind.ToString().ToLower();
+            if (_ignoredDeclarations.Contains(originalType))
+            {
+                Log.Info($"Keeping ignored {typeKind} {originalType.TypeName}.");
+                continue;
+            }
+
             if (originalType is CppClass cppClass)
             {
                 typeKind = cppClass.ClassKind.ToString().ToLower();
@@ -252,9 +270,19 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
         }
         headerBuilder.AppendLine("namespace app {");
         headerBuilder.AppendLine();
+        AppendForwardDeclarations(headerBuilder);
         var emittedPointerArrays = new HashSet<string>(StringComparer.Ordinal);
         foreach (CppEnum @enum in _targetDeclarations.OfType<CppEnum>())
         {
+            if (_ignoredDeclarations.Contains(@enum))
+            {
+                headerBuilder.AppendLine(IgnorePushMarker);
+                headerBuilder.AppendLine($"{@enum.ConstructDefinition()};");
+                headerBuilder.AppendLine(IgnorePopMarker);
+                headerBuilder.AppendLine();
+                continue;
+            }
+
             headerBuilder.AppendLine($"{@enum.ConstructDefinition()};");
             headerBuilder.AppendLine();
             AppendArrayDefinitions(headerBuilder, @enum);
@@ -264,7 +292,7 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
             headerBuilder.AppendLine($"{insertedEnum.ConstructDefinition()};");
             headerBuilder.AppendLine();
         }
-        foreach (ref CppTypeDeclaration data in CollectionsMarshal.AsSpan(_targetDeclarations))
+        foreach (CppTypeDeclaration data in OrderClassesByByValueDependencies())
         {
             if (data is not CppClass { } @class)
             {
@@ -273,6 +301,15 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
 
             if (UnresolvedComment.Equals(data.Comment))
             {
+                continue;
+            }
+
+            if (_ignoredDeclarations.Contains(data))
+            {
+                headerBuilder.AppendLine(IgnorePushMarker);
+                headerBuilder.AppendLine($"{@class.ConstructDefinition()};");
+                headerBuilder.AppendLine(IgnorePopMarker);
+                headerBuilder.AppendLine();
                 continue;
             }
 
@@ -311,15 +348,187 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
                     headerBuilder.AppendLine();
                 }
             }
-            headerBuilder.AppendLine($"{@class.ConstructDefinition()};");
+            if (_pinnedFields.Count > 0 && ClassHasPinnedFields(@class))
+            {
+                AppendPinnedClassDefinition(headerBuilder, @class);
+                headerBuilder.AppendLine(";");
+            }
+            else
+            {
+                headerBuilder.AppendLine($"{@class.ConstructDefinition()};");
+            }
             headerBuilder.AppendLine();
             AppendArrayDefinitions(headerBuilder, data);
         }
         headerBuilder.AppendLine("}");
+        headerBuilder.AppendLine();
+        headerBuilder.AppendLine(CONST_FOOTER);
 
         string result = headerBuilder.ToString();
         Log.Info($"Performance: construct definitions {Stopwatch.GetElapsedTime(constructStarted).TotalSeconds:F3}s.");
         return result;
+    }
+
+    // Orders class declarations so that every base class, by-value member type, and
+    // by-value array element is emitted before the class that embeds it (Issue 2). Pointer
+    // members impose no ordering constraint (they rely on the forward declarations). The
+    // by-value/base/array-element graph is acyclic, so a post-order DFS yields a valid order.
+    private List<CppTypeDeclaration> OrderClassesByByValueDependencies()
+    {
+        var classes = new List<CppTypeDeclaration>();
+        foreach (CppTypeDeclaration declaration in _targetDeclarations)
+        {
+            if (declaration is CppClass)
+            {
+                classes.Add(declaration);
+            }
+        }
+
+        var indexOf = new Dictionary<CppTypeDeclaration, int>(ReferenceEqualityComparer.Instance);
+        for (int i = 0; i < classes.Count; i++)
+        {
+            indexOf[classes[i]] = i;
+        }
+
+        var state = new byte[classes.Count];
+        var ordered = new List<CppTypeDeclaration>(classes.Count);
+
+        CppTypeDeclaration? ResolveType(CppType type)
+        {
+            ref CppTypeDeclaration found = ref _targetTypeLookup.Find(type);
+            if (Unsafe.IsNullRef(ref found))
+            {
+                return null;
+            }
+
+            CppTypeDeclaration declaration = found;
+            return indexOf.ContainsKey(declaration) ? declaration : null;
+        }
+
+        CppTypeDeclaration? ResolveName(string name)
+        {
+            ref CppTypeDeclaration found = ref _targetTypeLookup.Find(name);
+            if (Unsafe.IsNullRef(ref found))
+            {
+                return null;
+            }
+
+            CppTypeDeclaration declaration = found;
+            return indexOf.ContainsKey(declaration) ? declaration : null;
+        }
+
+        void VisitDependency(CppTypeDeclaration? dependency)
+        {
+            if (dependency is not null && indexOf.TryGetValue(dependency, out int index))
+            {
+                Visit(index);
+            }
+        }
+
+        void Visit(int i)
+        {
+            if (state[i] != 0)
+            {
+                return;
+            }
+
+            state[i] = 1;
+            CppTypeDeclaration data = classes[i];
+            if (data is CppClass cls)
+            {
+                if (MacroIdList.Equals(data.Comment) || MacroIdArray.Equals(data.Comment))
+                {
+                    // The DO_LIST_DEFINE/DO_ARRAY_DEFINE expansion embeds the element by
+                    // value, so the element must be defined before the macro is emitted.
+                    string name = cls.Name;
+                    string element = name.EndsWith("__Array", StringComparison.Ordinal)
+                        ? name[..^7]
+                        : (name.Length > 7 ? name[7..] : name);
+                    VisitDependency(ResolveName(element));
+                }
+                else if (!MacroIdArrayPtr.Equals(data.Comment))
+                {
+                    if (cls.BaseTypes.FirstOrDefault()?.Type is CppType baseType)
+                    {
+                        VisitDependency(ResolveType(baseType));
+                    }
+
+                    foreach (CppField field in cls.Fields)
+                    {
+                        CppType fieldType = field.Type;
+                        if (fieldType is CppClass)
+                        {
+                            VisitDependency(ResolveType(fieldType));
+                        }
+                        else if (fieldType is CppArrayType arrayType && arrayType.ElementType is CppClass)
+                        {
+                            VisitDependency(ResolveType(arrayType.ElementType));
+                        }
+                    }
+                }
+            }
+
+            state[i] = 2;
+            ordered.Add(data);
+        }
+
+        for (int i = 0; i < classes.Count; i++)
+        {
+            Visit(i);
+        }
+
+        return ordered;
+    }
+
+    // Emits `struct X;` forward declarations for every struct defined later in the
+    // namespace body so pointer members referencing a type declared further down still
+    // compile (Issue 2). By-value members and base classes rely on preserved source order.
+    private void AppendForwardDeclarations(StringBuilder builder)
+    {
+        var declared = new HashSet<string>(StringComparer.Ordinal);
+        int emitted = 0;
+
+        void Declare(string kind, string? name)
+        {
+            if (string.IsNullOrWhiteSpace(name) || !declared.Add(name!))
+            {
+                return;
+            }
+
+            builder.AppendLine($"{kind} {name};");
+            emitted++;
+        }
+
+        foreach (CppTypeDeclaration declaration in _targetDeclarations)
+        {
+            if (declaration is CppClass forwardClass && !UnresolvedComment.Equals(declaration.Comment))
+            {
+                Declare(forwardClass.ClassKind.ToString().ToLower(), forwardClass.Name);
+            }
+        }
+
+        foreach (CppClass insertedClass in _insertedTypes.OfType<CppClass>())
+        {
+            Declare(insertedClass.ClassKind.ToString().ToLower(), insertedClass.Name);
+        }
+
+        foreach (List<ArrayDefinition> definitions in _arrayDefinitionsByElementType.Values)
+        {
+            foreach (ArrayDefinition definition in definitions)
+            {
+                Declare("struct", $"{definition.ElementTypeName}__Array");
+            }
+        }
+
+        foreach (PointerArrayDefinition definition in _pointerArrayDefinitionsByName.Values)
+        {
+            Declare("struct", $"{definition.ElementTypeName}__Array");
+        }
+
+        if (emitted > 0)
+        {
+            builder.AppendLine();
+        }
     }
 
     private void AppendArrayDefinitions(StringBuilder builder, CppTypeDeclaration elementType)
@@ -420,6 +629,25 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
         ref List<CppField> targetFields = ref Unsafe.AsRef<List<CppField>>(pinnedGCHandleForTargetContainer.GetAddressOfObjectData());
         List<CppField> inputFields = GetEffectiveInputFields(inputClass, targetClass);
         List<CppField> rebuiltFields = [];
+
+        // Field-level ignore: fields wrapped in "#pragma apidiff push/pop ignore" keep
+        // Core's original type verbatim, and no new input field is auto-added into the
+        // wrapped region. Only pay this cost when the feature is actually used.
+        bool hasPins = _ignoreRanges.Count > 0 && targetFields.Exists(field => IsOffsetIgnored(field.Span.Start.Offset));
+        List<(int Lo, int Hi)> suppressIntervals = [];
+        if (hasPins)
+        {
+            foreach (CppField targetField in targetFields)
+            {
+                if (IsOffsetIgnored(targetField.Span.Start.Offset))
+                {
+                    _pinnedFields.Add(targetField);
+                }
+            }
+
+            suppressIntervals = ComputePinnedInputIntervals(targetFields, inputFields);
+        }
+
         if ((inputFields.Count == targetFields.Count) && (inputFields.Sum(def => def.Type.SizeOf) == targetFields.Sum(def => def.Type.SizeOf)))
         {
             goto COMPARE_SAME_LENGTH;
@@ -430,7 +658,18 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
             CppField inputField = inputFields[i];
             if (targetFields.Find(inputField.IsSameField) is CppField { } matchedField)
             {
+                if (hasPins && _pinnedFields.Contains(matchedField))
+                {
+                    rebuiltFields.Add(matchedField);
+                    continue;
+                }
+
                 CompareFieldInternal(inputField, matchedField);
+                continue;
+            }
+
+            if (hasPins && IsInputIndexSuppressed(i, suppressIntervals))
+            {
                 continue;
             }
 
@@ -448,6 +687,12 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
         for (int i = inputFields.Count - 1; i >= 0; --i)
         {
             CppField inputField = inputFields[i], targetField = targetFields[i];
+            if (hasPins && _pinnedFields.Contains(targetField))
+            {
+                rebuiltFields.Add(targetField);
+                continue;
+            }
+
             CompareFieldInternal(inputField, targetField);
         }
     MODIFY_AND_RETURN:
@@ -547,7 +792,7 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
             stopIndex = -1;
             for (int i = 0; i < hierarchy.Count; i++)
             {
-                if (hierarchy[i].LogicalName == targetBaseName)
+                if (CppTypeExt.IsSameTypeName(hierarchy[i].LogicalName, targetBaseName, relax: true))
                 {
                     stopIndex = i;
                     break;
@@ -833,6 +1078,21 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
                     continue;
                 }
 
+                // An inserted type may have a by-value class member whose type is not
+                // present in the target (e.g. ACTkByte4, AttackRangeDescModel). Such a
+                // member cannot be left as-is (undefined type) and cannot be walked into
+                // a definition here, so fall back to Il2CppObject to keep the emitted
+                // header compilable. Members resolvable in the target still walk normally.
+                if (fieldType is CppClass)
+                {
+                    ref CppTypeDeclaration resolvedFieldType = ref TryFindTargetType(fieldType);
+                    if (Unsafe.IsNullRef(ref resolvedFieldType))
+                    {
+                        RemapType(ref fieldType, _prebuiltTypes["Il2CppObject"]);
+                        continue;
+                    }
+                }
+
                 if (!TryWalkTypeHierarchy(@base, ref fieldType, true))
                 {
                     field.Comment = UnresolvedComment;
@@ -1045,6 +1305,189 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
         return indexes;
     }
 
+    // Pairs "#pragma apidiff push ignore" / "#pragma apidiff pop ignore" markers in the
+    // (already-mutated) target text into sorted, non-overlapping offset ranges. Nesting is
+    // handled with a depth counter; an unclosed push extends to end of file and a stray pop
+    // is ignored, so malformed markers degrade deterministically instead of throwing.
+    private void ComputeIgnoreRanges(string source)
+    {
+        List<int> pushes = FindAllOccurrencesMacroIndex(source, IgnorePushToken);
+        List<int> pops = FindAllOccurrencesMacroIndex(source, IgnorePopToken);
+        if (pushes.Count == 0)
+        {
+            return;
+        }
+
+        var events = new List<(int Offset, bool IsPush)>(pushes.Count + pops.Count);
+        foreach (int offset in pushes)
+        {
+            events.Add((offset, true));
+        }
+        foreach (int offset in pops)
+        {
+            events.Add((offset, false));
+        }
+        events.Sort((left, right) => left.Offset.CompareTo(right.Offset));
+
+        int depth = 0, start = -1;
+        foreach ((int offset, bool isPush) in events)
+        {
+            if (isPush)
+            {
+                if (depth++ == 0)
+                {
+                    start = offset;
+                }
+            }
+            else if (depth > 0 && --depth == 0)
+            {
+                _ignoreRanges.Add((start, offset));
+            }
+        }
+
+        if (depth > 0)
+        {
+            _ignoreRanges.Add((start, int.MaxValue));
+        }
+    }
+
+    private bool IsOffsetIgnored(int offset)
+    {
+        foreach ((int start, int end) in _ignoreRanges)
+        {
+            if (offset >= start && offset < end)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    // For each maximal run of pinned target fields, maps the run to an open interval of
+    // input indices (bounded by the input positions of the unpinned Core fields adjacent
+    // to the run). Unmatched input fields inside such an interval are the ones the user
+    // deleted, and must not be auto-added back.
+    private List<(int Lo, int Hi)> ComputePinnedInputIntervals(List<CppField> targetFields, List<CppField> inputFields)
+    {
+        var inputIndex = new Dictionary<string, int>(StringComparer.Ordinal);
+        for (int k = 0; k < inputFields.Count; k++)
+        {
+            inputIndex.TryAdd(inputFields[k].Name, k);
+        }
+
+        var intervals = new List<(int Lo, int Hi)>();
+        int count = targetFields.Count;
+        int t = 0;
+        while (t < count)
+        {
+            if (!IsOffsetIgnored(targetFields[t].Span.Start.Offset))
+            {
+                t++;
+                continue;
+            }
+
+            int runStart = t;
+            while (t < count && IsOffsetIgnored(targetFields[t].Span.Start.Offset))
+            {
+                t++;
+            }
+
+            int lo = -1;
+            if (runStart - 1 >= 0 && inputIndex.TryGetValue(targetFields[runStart - 1].Name, out int headIndex))
+            {
+                lo = headIndex;
+            }
+
+            int hi = inputFields.Count;
+            if (t < count && inputIndex.TryGetValue(targetFields[t].Name, out int tailIndex))
+            {
+                hi = tailIndex;
+            }
+
+            intervals.Add((lo, hi));
+        }
+
+        return intervals;
+    }
+
+    private static bool IsInputIndexSuppressed(int index, List<(int Lo, int Hi)> intervals)
+    {
+        foreach ((int lo, int hi) in intervals)
+        {
+            if (index > lo && index < hi)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private bool ClassHasPinnedFields(CppClass @class)
+    {
+        foreach (CppField field in @class.Fields)
+        {
+            if (_pinnedFields.Contains(field))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    // Emits a class definition with "#pragma apidiff push/pop ignore" markers wrapping the
+    // pinned field run(s), so field-level ignores round-trip into the regenerated header.
+    private void AppendPinnedClassDefinition(StringBuilder builder, CppClass @class)
+    {
+        builder.Append(@class.ClassKind.ToString().ToLower());
+        if (!string.IsNullOrWhiteSpace(@class.Name))
+        {
+            builder.Append($" {@class.Name}");
+        }
+
+        List<CppBaseType> baseTypes = @class.BaseTypes;
+        if (baseTypes.Count != 0)
+        {
+            builder.Append(" : ");
+            for (int i = baseTypes.Count - 1; i >= 0; --i)
+            {
+                builder.Append(baseTypes[i].Type.TypeName);
+                if (i != 0)
+                {
+                    builder.Append(',');
+                }
+            }
+        }
+
+        builder.AppendLine(" {");
+        bool inPinnedRun = false;
+        foreach (CppField field in @class.Fields)
+        {
+            bool pinned = _pinnedFields.Contains(field);
+            if (pinned && !inPinnedRun)
+            {
+                builder.AppendLine($"    {IgnorePushMarker}");
+                inPinnedRun = true;
+            }
+            else if (!pinned && inPinnedRun)
+            {
+                builder.AppendLine($"    {IgnorePopMarker}");
+                inPinnedRun = false;
+            }
+
+            builder.AppendLine($"    {field.ConstructDefinition()};");
+        }
+
+        if (inPinnedRun)
+        {
+            builder.AppendLine($"    {IgnorePopMarker}");
+        }
+
+        builder.Append('}');
+    }
+
     [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "<ElementType>k__BackingField")]
     private static extern ref CppType ClassElementTypeAsRef(CppTypeWithElementType @this);
 
@@ -1055,6 +1498,14 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
     private static extern void SetElementParent(CppElement @this, ICppContainer parent);
 
     const string CONST_HEADER = @"#pragma once
+
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored ""-Wunknown-pragmas""
+#elif defined(_MSC_VER)
+#pragma warning(push)
+#pragma warning(disable: 4068)
+#endif
 
 #if defined(__i386__) || defined(__arm__)
 #define IS_32BIT
@@ -1088,5 +1539,11 @@ int32_t _version; \
 
 #include <cstdint>
 #include ""il2cpp-class.h""";
+
+    const string CONST_FOOTER = @"#if defined(__clang__)
+#pragma clang diagnostic pop
+#elif defined(_MSC_VER)
+#pragma warning(pop)
+#endif";
 
 }
