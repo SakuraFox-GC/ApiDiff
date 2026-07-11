@@ -69,6 +69,64 @@ internal static class CppTypeExt
         return left == right;
     }
 
+    internal static string RemapLookupTypeName(string typeName)
+    {
+        return GlobalConfig.RemappedTypes.TryGetValue(typeName, out string? remappedName)
+            ? remappedName
+            : typeName;
+    }
+
+    internal static string GetLookupKey(string typeName, bool applyRemapping = true)
+    {
+        if (applyRemapping)
+        {
+            typeName = RemapLookupTypeName(typeName);
+        }
+
+        return typeName.Replace("__Enum", string.Empty);
+    }
+
+    internal static string GetLookupKey(CppType type, bool applyRemapping = false)
+    {
+        return GetLookupKey(GetComparableTypeName(type), applyRemapping);
+    }
+
+    internal static string GetRelaxedLookupKey(string typeName, bool applyRemapping = true)
+    {
+        if (applyRemapping)
+        {
+            typeName = RemapLookupTypeName(typeName);
+        }
+
+        var key = new StringBuilder(GlobalConfig.KnownReservedSuffixesFast.Count + typeName.Length + 1);
+        foreach (string suffix in GlobalConfig.KnownReservedSuffixesFast)
+        {
+            key.Append(typeName.EndsWith(suffix) ? '1' : '0');
+        }
+
+        typeName = typeName.Replace("__Enum", string.Empty);
+        int lastUnderscore = typeName.LastIndexOf('_');
+        key.Append(':');
+        key.Append(lastUnderscore < 0 ? typeName : typeName[(lastUnderscore + 1)..]);
+        return key.ToString();
+    }
+
+    internal static string GetRelaxedLookupKey(CppType type, bool applyRemapping = false)
+    {
+        return GetRelaxedLookupKey(GetComparableTypeName(type), applyRemapping);
+    }
+
+    private static string GetComparableTypeName(CppType type)
+    {
+        string typeName = type.FullName;
+        if (type.Parent is CppNamespace { } @namespace)
+        {
+            typeName = typeName.Replace($"{@namespace.Name}::", string.Empty);
+        }
+
+        return typeName;
+    }
+
     private static bool CheckGeneric(string typeName)
     {
         int indexOfUnderscore = typeName.IndexOf('_');
