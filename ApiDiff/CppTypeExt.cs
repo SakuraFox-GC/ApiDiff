@@ -47,6 +47,8 @@ internal static class CppTypeExt
 
     private static bool CompareTypeName(string left, string right, bool relax)
     {
+        left = CanonicalizeForCompare(left);
+        right = CanonicalizeForCompare(right);
         if (GlobalConfig.KnownReservedSuffixesFast.Exists(suffix => left.EndsWith(suffix) != right.EndsWith(suffix)))
         {
             return false;
@@ -67,6 +69,30 @@ internal static class CppTypeExt
         }
 
         return left == right;
+    }
+
+    // Applies RemappedTypes to the base token while tolerating a trailing pointer
+    // decoration (e.g. "List_1_..._ *"), so a configured equivalence closes the
+    // comparison on pointer FullNames as well as bare class names.
+    private static string CanonicalizeForCompare(string name)
+    {
+        int end = name.Length;
+        while (end > 0 && (name[end - 1] == '*' || name[end - 1] == ' '))
+        {
+            end--;
+        }
+
+        return end == name.Length
+            ? RemapLookupTypeName(name)
+            : RemapLookupTypeName(name[..end]) + name[end..];
+    }
+
+    // Relaxed/exact comparison of two raw type-name strings, reusing CompareTypeName so
+    // namespace-qualified Inspector names match Core's short names (used for base-class
+    // resolution in the hierarchy walk).
+    internal static bool IsSameTypeName(string left, string right, bool relax = false)
+    {
+        return CompareTypeName(left, right, relax);
     }
 
     internal static string RemapLookupTypeName(string typeName)
