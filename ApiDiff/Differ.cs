@@ -898,11 +898,11 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
         includesTargetBase = false;
         IReadOnlyList<InputClassLayer> hierarchy = GetInputClassHierarchy(inputClass);
         string? targetBaseName = targetClass.BaseTypes.FirstOrDefault()?.Type.TypeName;
-        int stopIndex = hierarchy.Count;
+        int stopIndex = hierarchy.Length;
         if (targetBaseName is not null)
         {
             stopIndex = -1;
-            for (int i = 0; i < hierarchy.Count; i++)
+            for (int i = 0; i < hierarchy.Length; i++)
             {
                 if (CppTypeExt.IsSameTypeName(hierarchy[i].LogicalName, targetBaseName, relax: true))
                 {
@@ -987,7 +987,7 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
         return field.Name == "_" && field.Type.TypeName.EndsWith("__Fields");
     }
 
-    private IReadOnlyList<InputClassLayer> GetInputClassHierarchy(CppClass inputClass)
+    private InputClassLayer[] GetInputClassHierarchy(CppClass inputClass)
     {
         if (_inputClassHierarchyCache.TryGetValue(inputClass, out InputClassLayer[]? cachedHierarchy))
         {
@@ -1140,7 +1140,7 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
 
     private sealed record PointerArrayDefinition(string ArrayTypeName, string ElementTypeName)
     {
-        public HashSet<CppTypeDeclaration> Owners { get; } = new(ReferenceEqualityComparer.Instance);
+        public HashSet<CppTypeDeclaration> Owners { get; } = [with(ReferenceEqualityComparer.Instance)];
     }
 
     private unsafe bool TryWalkEnum(ref CppEnum targetEnum)
