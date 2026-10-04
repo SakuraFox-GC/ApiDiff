@@ -152,6 +152,7 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
         Log.Info($"Performance: target lookup indexes {Stopwatch.GetElapsedTime(targetIndexStarted).TotalSeconds:F3}s.");
         long walkStarted = Stopwatch.GetTimestamp();
         Span<CppTypeDeclaration> rawData = CollectionsMarshal.AsSpan(_targetDeclarations);
+        List<string> droppedDeclarations = [];
         for (int i = rawData.Length - 1; i >= 0; --i)
         {
             ref CppTypeDeclaration originalType = ref rawData[i];
@@ -192,11 +193,25 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
             {
                 Log.Info($"Skipping expanded {typeKind} {originalType.TypeName}.");
             }
+            else if (originalType is CppEnum)
+            {
+                Log.Error($"Can not find {typeKind} {originalType.TypeName} in the input, keeping it unchanged.");
+            }
             else
             {
-                Log.Error($"Skipping invalid {typeKind} {originalType.TypeName}.");
+                // Dropped rather than kept so the header does not accumulate dead types;
+                // anything still pointing at it has to be fixed by hand.
+                Log.Error($"Can not find {typeKind} {originalType.TypeName} in the input, dropping it.");
                 originalType.Comment = UnresolvedComment;
+                droppedDeclarations.Add(originalType.TypeName);
             }
+        }
+
+        if (droppedDeclarations.Count > 0)
+        {
+            Log.FloodColour = true;
+            Log.Error($"{droppedDeclarations.Count} declarations not found in the input were dropped: {string.Join(", ", droppedDeclarations)}.");
+            Log.FloodColour = false;
         }
 
         Log.Info($"Performance: declaration processing {Stopwatch.GetElapsedTime(walkStarted).TotalSeconds:F3}s.");
