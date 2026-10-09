@@ -79,7 +79,9 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
         string targetFileContent = File.ReadAllText(TargetHeader).Replace("#pragma once", $"#pragma once\ntypedef {(targetWindows ? "unsigned __int64" : "unsigned long")} size_t;");
         if (targetWindows)
         {
-            targetFileContent = targetFileContent.Replace("<cstdint>", "<stdint.h>");
+            // stdint.h pulls in vcruntime's size_t, which CppAst flattens to a primitive.
+            // Redeclaring it after the include keeps fields spelled as size_t.
+            targetFileContent = targetFileContent.Replace("<cstdint>", "<stdint.h>\ntypedef unsigned __int64 size_t;");
         }
         _macrosExpansionIndex.Add(MacroIdArray, FindAllOccurrencesMacroIndex(targetFileContent, "DO_ARRAY_DEFINE"));
         _macrosExpansionIndex.Add(MacroIdArrayPtr, FindAllOccurrencesMacroIndex(targetFileContent, "DO_ARRAY_DEFINE_PTR"));
@@ -100,7 +102,9 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
             return false;
         }
 
-        _inputDeclarations.AddRange([.. _inputCompilation.Typedefs, .. _inputCompilation.Enums, .. _inputCompilation.Classes]);
+        // A class only referenced as `struct X *` is an incomplete declaration without
+        // fields; matching it would wipe every field of Core's X, so only definitions count.
+        _inputDeclarations.AddRange([.. _inputCompilation.Typedefs, .. _inputCompilation.Enums, .. _inputCompilation.Classes.Where(@class => @class.IsDefinition)]);
         _targetDeclarations.AddRange([.. appNamespace.Enums, .. appNamespace.Classes]);
 
         //_inputDeclarations.AddRange([.. _inputCompilation.Typedefs, .. _inputCompilation.Enums, .. _inputCompilation.Classes]);
@@ -148,6 +152,7 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
         Log.Info($"Performance: target lookup indexes {Stopwatch.GetElapsedTime(targetIndexStarted).TotalSeconds:F3}s.");
         long walkStarted = Stopwatch.GetTimestamp();
         Span<CppTypeDeclaration> rawData = CollectionsMarshal.AsSpan(_targetDeclarations);
+        List<string> droppedDeclarations = [];
         for (int i = rawData.Length - 1; i >= 0; --i)
         {
             ref CppTypeDeclaration originalType = ref rawData[i];
@@ -188,11 +193,25 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
             {
                 Log.Info($"Skipping expanded {typeKind} {originalType.TypeName}.");
             }
+            else if (originalType is CppEnum)
+            {
+                Log.Error($"Can not find {typeKind} {originalType.TypeName} in the input, keeping it unchanged.");
+            }
             else
             {
-                Log.Error($"Skipping invalid {typeKind} {originalType.TypeName}.");
+                // Dropped rather than kept so the header does not accumulate dead types;
+                // anything still pointing at it has to be fixed by hand.
+                Log.Error($"Can not find {typeKind} {originalType.TypeName} in the input, dropping it.");
                 originalType.Comment = UnresolvedComment;
+                droppedDeclarations.Add(originalType.TypeName);
             }
+        }
+
+        if (droppedDeclarations.Count > 0)
+        {
+            Log.FloodColour = true;
+            Log.Error($"{droppedDeclarations.Count} declarations not found in the input were dropped: {string.Join(", ", droppedDeclarations)}.");
+            Log.FloodColour = false;
         }
 
         Log.Info($"Performance: declaration processing {Stopwatch.GetElapsedTime(walkStarted).TotalSeconds:F3}s.");
@@ -270,27 +289,33 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
         }
         headerBuilder.AppendLine("namespace app {");
         headerBuilder.AppendLine();
-        AppendForwardDeclarations(headerBuilder);
+
+        // The namespace body is built first so that only the types it actually uses
+        // through a pointer before their definition get a forward declaration.
+        StringBuilder bodyBuilder = new();
+        var tracker = new ForwardDeclarationTracker();
         var emittedPointerArrays = new HashSet<string>(StringComparer.Ordinal);
         foreach (CppEnum @enum in _targetDeclarations.OfType<CppEnum>())
         {
+            tracker.Define(@enum.Name);
             if (_ignoredDeclarations.Contains(@enum))
             {
-                headerBuilder.AppendLine(IgnorePushMarker);
-                headerBuilder.AppendLine($"{@enum.ConstructDefinition()};");
-                headerBuilder.AppendLine(IgnorePopMarker);
-                headerBuilder.AppendLine();
+                bodyBuilder.AppendLine(IgnorePushMarker);
+                bodyBuilder.AppendLine($"{@enum.ConstructDefinition()};");
+                bodyBuilder.AppendLine(IgnorePopMarker);
+                bodyBuilder.AppendLine();
                 continue;
             }
 
-            headerBuilder.AppendLine($"{@enum.ConstructDefinition()};");
-            headerBuilder.AppendLine();
-            AppendArrayDefinitions(headerBuilder, @enum);
+            bodyBuilder.AppendLine($"{@enum.ConstructDefinition()};");
+            bodyBuilder.AppendLine();
+            AppendArrayDefinitions(bodyBuilder, @enum, tracker);
         }
         foreach (CppEnum insertedEnum in _insertedTypes.OfType<CppEnum>())
         {
-            headerBuilder.AppendLine($"{insertedEnum.ConstructDefinition()};");
-            headerBuilder.AppendLine();
+            tracker.Define(insertedEnum.Name);
+            bodyBuilder.AppendLine($"{insertedEnum.ConstructDefinition()};");
+            bodyBuilder.AppendLine();
         }
         foreach (CppTypeDeclaration data in OrderClassesByByValueDependencies())
         {
@@ -306,14 +331,15 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
 
             if (_ignoredDeclarations.Contains(data))
             {
-                headerBuilder.AppendLine(IgnorePushMarker);
-                headerBuilder.AppendLine($"{@class.ConstructDefinition()};");
-                headerBuilder.AppendLine(IgnorePopMarker);
-                headerBuilder.AppendLine();
+                tracker.DefineClass(@class);
+                bodyBuilder.AppendLine(IgnorePushMarker);
+                bodyBuilder.AppendLine($"{@class.ConstructDefinition()};");
+                bodyBuilder.AppendLine(IgnorePopMarker);
+                bodyBuilder.AppendLine();
                 continue;
             }
 
-            AppendPointerArrayDefinitions(headerBuilder, data, emittedPointerArrays);
+            AppendPointerArrayDefinitions(bodyBuilder, data, emittedPointerArrays, tracker);
 
             if (MacroIdList.Equals(data.Comment) || MacroIdArray.Equals(data.Comment) || MacroIdArrayPtr.Equals(data.Comment))
             {
@@ -333,9 +359,15 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
                     typeName = typeName[7..];
                 }
 
-                headerBuilder.AppendLine($"{macroName}({typeName})");
-                headerBuilder.AppendLine();
-                AppendArrayDefinitions(headerBuilder, data);
+                if (MacroIdArrayPtr.Equals(data.Comment))
+                {
+                    AppendPointerElementDeclaration(bodyBuilder, typeName, tracker);
+                }
+                tracker.Define($"{typeName}__Array");
+                tracker.Define(@class.Name);
+                bodyBuilder.AppendLine($"{macroName}({typeName})");
+                bodyBuilder.AppendLine();
+                AppendArrayDefinitions(bodyBuilder, data, tracker);
                 continue;
             }
 
@@ -344,22 +376,35 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
             {
                 foreach (CppType? insertedType in insertionList)
                 {
-                    headerBuilder.AppendLine($"{insertedType.ConstructDefinition()};");
-                    headerBuilder.AppendLine();
+                    if (insertedType is CppClass insertedClass)
+                    {
+                        tracker.DefineClass(insertedClass);
+                    }
+                    else if (insertedType is CppEnum insertedEnum)
+                    {
+                        tracker.Define(insertedEnum.Name);
+                    }
+
+                    bodyBuilder.AppendLine($"{insertedType.ConstructDefinition()};");
+                    bodyBuilder.AppendLine();
                 }
             }
+            tracker.DefineClass(@class);
             if (_pinnedFields.Count > 0 && ClassHasPinnedFields(@class))
             {
-                AppendPinnedClassDefinition(headerBuilder, @class);
-                headerBuilder.AppendLine(";");
+                AppendPinnedClassDefinition(bodyBuilder, @class);
+                bodyBuilder.AppendLine(";");
             }
             else
             {
-                headerBuilder.AppendLine($"{@class.ConstructDefinition()};");
+                bodyBuilder.AppendLine($"{@class.ConstructDefinition()};");
             }
-            headerBuilder.AppendLine();
-            AppendArrayDefinitions(headerBuilder, data);
+            bodyBuilder.AppendLine();
+            AppendArrayDefinitions(bodyBuilder, data, tracker);
         }
+
+        AppendForwardDeclarations(headerBuilder, tracker);
+        headerBuilder.Append(bodyBuilder);
         headerBuilder.AppendLine("}");
         headerBuilder.AppendLine();
         headerBuilder.AppendLine(CONST_FOOTER);
@@ -480,17 +525,17 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
         return ordered;
     }
 
-    // Emits `struct X;` forward declarations for every struct defined later in the
-    // namespace body so pointer members referencing a type declared further down still
-    // compile (Issue 2). By-value members and base classes rely on preserved source order.
-    private void AppendForwardDeclarations(StringBuilder builder)
+    // Emits `struct X;` forward declarations for the structs the namespace body uses
+    // through a pointer before defining them, so those members still compile (Issue 2).
+    // By-value members and base classes rely on the dependency ordering instead.
+    private void AppendForwardDeclarations(StringBuilder builder, ForwardDeclarationTracker tracker)
     {
         var declared = new HashSet<string>(StringComparer.Ordinal);
         int emitted = 0;
 
         void Declare(string kind, string? name)
         {
-            if (string.IsNullOrWhiteSpace(name) || !declared.Add(name!))
+            if (string.IsNullOrWhiteSpace(name) || !tracker.IsUsedBeforeDefinition(name!) || !declared.Add(name!))
             {
                 return;
             }
@@ -531,7 +576,7 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
         }
     }
 
-    private void AppendArrayDefinitions(StringBuilder builder, CppTypeDeclaration elementType)
+    private void AppendArrayDefinitions(StringBuilder builder, CppTypeDeclaration elementType, ForwardDeclarationTracker? tracker = null)
     {
         if (!_arrayDefinitionsByElementType.TryGetValue(elementType, out List<ArrayDefinition>? definitions))
         {
@@ -540,12 +585,31 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
 
         foreach (ArrayDefinition definition in definitions)
         {
+            if (MacroIdArrayPtr.Equals(definition.Macro))
+            {
+                tracker?.Use(definition.ElementTypeName);
+            }
+            tracker?.Define($"{definition.ElementTypeName}__Array");
             builder.AppendLine($"{definition.Macro.Text}({definition.ElementTypeName})");
             builder.AppendLine();
         }
     }
 
-    private void AppendPointerArrayDefinitions(StringBuilder builder, CppTypeDeclaration owner, HashSet<string> emittedArrayTypes)
+    // DO_ARRAY_DEFINE_PTR(X) needs X declared. Declare it inline, right before the macro,
+    // only when nothing has declared it yet. Both the generated macro and one read back
+    // from the target go through here, so a regenerated header reproduces itself.
+    private static void AppendPointerElementDeclaration(StringBuilder builder, string elementTypeName, ForwardDeclarationTracker tracker)
+    {
+        if (tracker.IsDeclared(elementTypeName))
+        {
+            return;
+        }
+
+        tracker.Define(elementTypeName);
+        builder.AppendLine($"struct {elementTypeName};");
+    }
+
+    private void AppendPointerArrayDefinitions(StringBuilder builder, CppTypeDeclaration owner, HashSet<string> emittedArrayTypes, ForwardDeclarationTracker tracker)
     {
         foreach (PointerArrayDefinition definition in _pointerArrayDefinitionsByName.Values)
         {
@@ -554,7 +618,8 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
                 continue;
             }
 
-            builder.AppendLine($"struct {definition.ElementTypeName};");
+            AppendPointerElementDeclaration(builder, definition.ElementTypeName, tracker);
+            tracker.Define($"{definition.ElementTypeName}__Array");
             builder.AppendLine($"{MacroIdArrayPtr.Text}({definition.ElementTypeName})");
             builder.AppendLine();
         }
@@ -627,7 +692,7 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
 
         using var pinnedGCHandleForTargetContainer = new PinnedGCHandle<CppContainerList<CppField>>(targetClass.Fields);
         ref List<CppField> targetFields = ref Unsafe.AsRef<List<CppField>>(pinnedGCHandleForTargetContainer.GetAddressOfObjectData());
-        List<CppField> inputFields = GetEffectiveInputFields(inputClass, targetClass);
+        List<CppField> inputFields = GetEffectiveInputFields(inputClass, targetClass, out bool inputIncludesTargetBase);
         List<CppField> rebuiltFields = [];
 
         // Field-level ignore: fields wrapped in "#pragma apidiff push/pop ignore" keep
@@ -648,11 +713,23 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
             suppressIntervals = ComputePinnedInputIntervals(targetFields, inputFields);
         }
 
+        // An empty body is a deliberate choice in Sakura.Core: the struct is only used
+        // through its base class or by pointer, so no input field should be added back.
+        if (targetFields.Count == 0)
+        {
+            goto MODIFY_AND_RETURN;
+        }
+
         if ((inputFields.Count == targetFields.Count) && (inputFields.Sum(def => def.Type.SizeOf) == targetFields.Sum(def => def.Type.SizeOf)))
         {
             goto COMPARE_SAME_LENGTH;
         }
 
+        // Fields after the last field Core keeps were trimmed on purpose: dropping
+        // trailing fields does not move any kept field, so they are not restored.
+        List<CppField> keptFields = targetFields;
+        int lastMatchedInputIndex = inputFields.FindLastIndex(inputField => keptFields.Exists(inputField.IsSameField));
+        HashSet<string> baseFieldNames = inputIncludesTargetBase ? GetTargetBaseFieldNames(targetClass) : [];
         for (int i = inputFields.Count - 1; i >= 0; --i)
         {
             CppField inputField = inputFields[i];
@@ -669,6 +746,20 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
             }
 
             if (hasPins && IsInputIndexSuppressed(i, suppressIntervals))
+            {
+                continue;
+            }
+
+            if (lastMatchedInputIndex > -1 && i > lastMatchedInputIndex)
+            {
+                continue;
+            }
+
+            // When the input hierarchy could not be cut at the target base (flattened
+            // structs such as X__Boxed carrying klass/monitor), fields named like a base
+            // field already come from the target's base class. A cut hierarchy only holds
+            // the class's own fields, which may legitimately reuse a base field's name.
+            if (baseFieldNames.Contains(inputField.Name))
             {
                 continue;
             }
@@ -698,13 +789,23 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
     MODIFY_AND_RETURN:
         _walkedClasses.Add(targetClass.TypeName);
         rebuiltFields.Reverse();
+        if (hasPins)
+        {
+            RestoreUnmatchedPinnedFields(targetFields, rebuiltFields);
+        }
         targetFields = rebuiltFields;
         return true;
 
         void CompareFieldInternal(CppField f1, CppField f2)
         {
-            TryRefineFieldTypeFirstPass(ref f1);
-            TryRefineFieldTypeFirstPass(ref f2);
+            if (!IsTargetDefinedClass(f1.Type))
+            {
+                TryRefineFieldTypeFirstPass(ref f1);
+            }
+            if (!IsTargetDefinedClass(f2.Type))
+            {
+                TryRefineFieldTypeFirstPass(ref f2);
+            }
             CppType inputFieldType = f1.Type, targetFieldType = f2.Type;
             if (inputFieldType.IsKnownType && targetFieldType.IsKnownType)
             {
@@ -723,8 +824,16 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
                     rebuiltFields.Add(f2);
                     return;
                 }
+                else if (f1.IsSameField(f2) && IsCuratedPointerType(inputFieldType, targetFieldType))
+                {
+                    rebuiltFields.Add(f2);
+                    return;
+                }
             }
-            else if (inputFieldType.TypeKind is CppTypeKind.Primitive or CppTypeKind.Typedef && targetFieldType.TypeKind is CppTypeKind.Enum or CppTypeKind.Primitive)
+            // Core's enum (Inspector emits enum fields as int32_t) or its own primitive
+            // spelling is kept only while the size is unchanged; a resized field must
+            // take the input type or every following offset is wrong.
+            else if (inputFieldType.TypeKind is CppTypeKind.Primitive or CppTypeKind.Typedef && targetFieldType.TypeKind is CppTypeKind.Enum or CppTypeKind.Primitive && inputFieldType.SizeOf == targetFieldType.SizeOf)
             {
                 rebuiltFields.Add(f2);
                 return;
@@ -782,8 +891,11 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
         return effectiveClass;
     }
 
-    private List<CppField> GetEffectiveInputFields(CppClass inputClass, CppClass targetClass)
+    // includesTargetBase is set when the input hierarchy could not be cut at the target's
+    // base class, so the returned fields may still contain the base's own fields.
+    private List<CppField> GetEffectiveInputFields(CppClass inputClass, CppClass targetClass, out bool includesTargetBase)
     {
+        includesTargetBase = false;
         IReadOnlyList<InputClassLayer> hierarchy = GetInputClassHierarchy(inputClass);
         string? targetBaseName = targetClass.BaseTypes.FirstOrDefault()?.Type.TypeName;
         int stopIndex = hierarchy.Count;
@@ -802,6 +914,7 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
 
         if (stopIndex < 0)
         {
+            includesTargetBase = true;
             stopIndex = hierarchy.Count;
             if (targetBaseName != "Il2CppObject")
             {
@@ -816,6 +929,57 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
         }
 
         return fields;
+    }
+
+    // Core sometimes points at its own type instead of Inspector's (e.g. Blackboard *
+    // for List_1_Torappu_Blackboard_DataPair_ *, Entity__Array * for Unit__Array *).
+    // When the input pointee does not exist in the target but the target pointee does,
+    // keep Core's choice rather than degrading it to Il2CppObject/Il2CppArray.
+    private bool IsCuratedPointerType(CppType inputType, CppType targetType)
+    {
+        if (inputType is not CppPointerType inputPointer || targetType is not CppPointerType targetPointer)
+        {
+            return false;
+        }
+
+        CppType inputPointee = inputPointer.FindPointerBaseType(out int inputDepth);
+        CppType targetPointee = targetPointer.FindPointerBaseType(out int targetDepth);
+        if (inputDepth != targetDepth)
+        {
+            return false;
+        }
+
+        return Unsafe.IsNullRef(ref TryFindTargetType(inputPointee)) && !Unsafe.IsNullRef(ref TryFindTargetType(targetPointee));
+    }
+
+    private static HashSet<string> GetTargetBaseFieldNames(CppClass targetClass)
+    {
+        var names = new HashSet<string>(StringComparer.Ordinal);
+        var visited = new HashSet<CppClass>(ReferenceEqualityComparer.Instance);
+        CppClass current = targetClass;
+        while (current.BaseTypes.FirstOrDefault()?.Type is CppClass baseClass && visited.Add(baseClass))
+        {
+            AddFieldNames(baseClass);
+            current = baseClass;
+        }
+
+        return names;
+
+        // Members of anonymous unions/structs (e.g. Il2CppObject's klass/vtable union)
+        // are accessed as if they were direct fields.
+        void AddFieldNames(CppClass @class)
+        {
+            foreach (CppField field in @class.Fields)
+            {
+                if (field.Type is CppClass { Name.Length: 0 } anonymous)
+                {
+                    AddFieldNames(anonymous);
+                    continue;
+                }
+
+                names.Add(field.Name);
+            }
+        }
     }
 
     private static bool IsInspectorBaseField(CppField field)
@@ -913,6 +1077,63 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
         return result;
     }
 
+    // Records, in emission order, where each namespace type is defined and where it is
+    // first used through a pointer. Only types used before their definition need a
+    // forward declaration; types defined outside the namespace are never reported.
+    private sealed class ForwardDeclarationTracker
+    {
+        private readonly Dictionary<string, int> _definedAt = new(StringComparer.Ordinal), _firstUsedAt = new(StringComparer.Ordinal);
+        private int _step;
+
+        public void Define(string name) => _definedAt.TryAdd(name, _step++);
+
+        public void Use(string name) => _firstUsedAt.TryAdd(name, _step++);
+
+        public bool IsDeclared(string name) => _definedAt.ContainsKey(name);
+
+        // A struct's name is in scope inside its own body, so define it before its fields.
+        public void DefineClass(CppClass @class)
+        {
+            Define(@class.Name);
+            UseFields(@class);
+        }
+
+        public bool IsUsedBeforeDefinition(string name)
+        {
+            return _firstUsedAt.TryGetValue(name, out int usedAt) && _definedAt.TryGetValue(name, out int definedAt) && usedAt < definedAt;
+        }
+
+        private void UseFields(CppClass @class)
+        {
+            foreach (CppField field in @class.Fields)
+            {
+                CppType type = field.Type is CppQualifiedType qualified ? qualified.ElementType : field.Type;
+                if (type is CppClass { Name.Length: 0 } anonymous)
+                {
+                    UseFields(anonymous);
+                    continue;
+                }
+
+                if (type is not CppPointerType pointer)
+                {
+                    continue;
+                }
+
+                CppType pointee = pointer.FindPointerBaseType(out _);
+                if (pointee is CppQualifiedType qualifiedPointee)
+                {
+                    pointee = qualifiedPointee.ElementType;
+                }
+
+                // Zero-sized classes are written as `struct X *`, which declares X itself.
+                if (pointee is CppClass { SizeOf: > 0 } or CppEnum)
+                {
+                    Use(pointee.TypeName);
+                }
+            }
+        }
+    }
+
     private readonly record struct InputClassLayer(string LogicalName, CppClass StorageClass);
 
     private readonly record struct ArrayDefinition(CppCommentText Macro, string ElementTypeName);
@@ -952,6 +1173,26 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
         //ICppContainer parent = targetEnum.Parent;
         //targetEnum = ref Unsafe.As<CppTypeDeclaration, CppEnum>(ref inputType);
         //SetElementParent(targetEnum, parent);
+
+        // Core keeps a full enum when it needs new items to show up, and trims it down
+        // to the few items it uses otherwise (e.g. HttpStatusCode). Treat an enum that
+        // keeps less than half of the input items as curated: refresh the values of the
+        // kept items only, instead of restoring everything.
+        var keptNames = new HashSet<string>(targetItems.Select(item => item.Name), StringComparer.Ordinal);
+        int matchedCount = inputItems.Count(item => keptNames.Contains(item.Name));
+        if (matchedCount > 0 && matchedCount * 2 < inputItems.Count)
+        {
+            Log.Warn($"Keeping curated enum {targetEnum.TypeName}: {matchedCount} of {inputItems.Count} items, {inputItems.Count - matchedCount} not restored.");
+            if (matchedCount != targetItems.Count)
+            {
+                Log.Warn($"Dropping {targetItems.Count - matchedCount} items of {targetEnum.TypeName} that no longer exist.");
+            }
+
+            List<CppEnumItem> curatedItems = inputItems.FindAll(item => keptNames.Contains(item.Name));
+            targetItems.Clear();
+            targetItems.AddRange(curatedItems);
+            return true;
+        }
 
         targetItems.Clear();
         targetItems.AddRange(inputItems);
@@ -1073,7 +1314,7 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
 
             if (!fieldType.IsPointerType)
             {
-                if (TryRefineFieldTypeFirstPass(ref field))
+                if (!IsTargetDefinedClass(fieldType) && TryRefineFieldTypeFirstPass(ref field))
                 {
                     continue;
                 }
@@ -1240,6 +1481,13 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
         }
 
         return ref _targetGlobalTypeLookup.Find(typeName);
+    }
+
+    // Single-primitive wrapper structs are only collapsed when Core does not define the
+    // struct itself; otherwise Core's own by-value type would be replaced by the primitive.
+    private bool IsTargetDefinedClass(CppType type)
+    {
+        return type is CppClass && !Unsafe.IsNullRef(ref TryFindTargetType(type));
     }
 
     private static unsafe bool TryRefineFieldTypeFirstPass(ref CppField field)
@@ -1422,6 +1670,34 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
         }
 
         return false;
+    }
+
+    // Pinned fields are only carried over when an input field of the same name matches
+    // them. A pinned field Core named itself has no match, so put it back right after
+    // the closest preceding target field that survived (or first if none did).
+    private void RestoreUnmatchedPinnedFields(List<CppField> targetFields, List<CppField> rebuiltFields)
+    {
+        for (int i = 0; i < targetFields.Count; i++)
+        {
+            CppField pinnedField = targetFields[i];
+            if (!_pinnedFields.Contains(pinnedField) || rebuiltFields.Exists(pinnedField.IsSameField))
+            {
+                continue;
+            }
+
+            int insertAt = 0;
+            for (int j = i - 1; j >= 0; j--)
+            {
+                int previousIndex = rebuiltFields.FindIndex(targetFields[j].IsSameField);
+                if (previousIndex >= 0)
+                {
+                    insertAt = previousIndex + 1;
+                    break;
+                }
+            }
+
+            rebuiltFields.Insert(insertAt, pinnedField);
+        }
     }
 
     private bool ClassHasPinnedFields(CppClass @class)

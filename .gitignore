@@ -364,3 +364,5 @@ FodyWeavers.xsd
 
 **/MSBuild_Logs
 **/launchSettings.json
+# ApiDiff test output
+tests/.out/
