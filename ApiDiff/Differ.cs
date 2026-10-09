@@ -896,7 +896,7 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
     private List<CppField> GetEffectiveInputFields(CppClass inputClass, CppClass targetClass, out bool includesTargetBase)
     {
         includesTargetBase = false;
-        IReadOnlyList<InputClassLayer> hierarchy = GetInputClassHierarchy(inputClass);
+        InputClassLayer[] hierarchy = GetInputClassHierarchy(inputClass);
         string? targetBaseName = targetClass.BaseTypes.FirstOrDefault()?.Type.TypeName;
         int stopIndex = hierarchy.Length;
         if (targetBaseName is not null)
@@ -915,7 +915,7 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
         if (stopIndex < 0)
         {
             includesTargetBase = true;
-            stopIndex = hierarchy.Count;
+            stopIndex = hierarchy.Length;
             if (targetBaseName != "Il2CppObject")
             {
                 Log.Warn($"Can not find target base {targetBaseName} in Inspector hierarchy of {inputClass.TypeName}; using the complete input hierarchy.");
