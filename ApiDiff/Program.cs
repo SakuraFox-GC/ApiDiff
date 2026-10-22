@@ -9,6 +9,12 @@ namespace ApiDiff
         {
             Console.Title = nameof(ApiDiff);
 
+            if (args.Length > 0 && args[0] == "--typeinfo")
+            {
+                UpdateTypeInfo(args);
+                return;
+            }
+
             if (args.Length < 3)
             {
                 PrintHelp();
@@ -54,17 +60,64 @@ Construction all done! Press any key to apply the changes to the target header
             File.WriteAllText(targetHeader, generatedHeader);
         }
 
+        private static void UpdateTypeInfo(string[] args)
+        {
+            if (args.Length != 5)
+            {
+                PrintHelp();
+                return;
+            }
+
+            try
+            {
+                TypeInfoUpdater.Update update = TypeInfoUpdater.Prepare(args[1], args[2], args[3], args[4], CppTypeExt.GlobalConfig.RemappedTypes);
+                if (update.ChangedAliases.Count == 0)
+                {
+                    Log.Info("TypeInfo class hints are already current; no files changed.");
+                    return;
+                }
+                Log.Info($"Class hints to update: {string.Join(", ", update.ChangedAliases)}");
+                Log.Info($"Press any key to apply these class hint changes to {args[3]}.");
+                Console.ReadKey(true);
+                if (!File.ReadAllBytes(args[3]).AsSpan().SequenceEqual(update.Original))
+                    throw new IOException("Class hints changed while the update was being reviewed; run the command again.");
+                string destination = Path.GetFullPath(args[3]);
+                string temporary = Path.Combine(Path.GetDirectoryName(destination)!, $".{Path.GetFileName(destination)}.{Guid.NewGuid():N}.tmp");
+                try
+                {
+                    File.WriteAllBytes(temporary, update.Proposed);
+                    File.Move(temporary, destination, overwrite: true);
+                }
+                finally
+                {
+                    if (File.Exists(temporary)) File.Delete(temporary);
+                }
+            }
+            catch (Exception error) when (error is InvalidDataException or IOException or System.Text.Json.JsonException or InvalidOperationException or KeyNotFoundException or UnauthorizedAccessException or ArgumentException)
+            {
+                Log.Error("TypeInfo update failed.", error);
+                Environment.ExitCode = 1;
+            }
+        }
+
         private static void PrintHelp()
         {
             Console.WriteLine(@"Usage:
   ApiDiff.exe <InputHeaderFilePath> <TargetHeaderFilePath> <AndroidNDKSysrootIncludeDir>
+  ApiDiff.exe --typeinfo <InspectorJson> <TypeInfoHeader> <ClassesJson> <AssembliesJson>
 
 Description:
-  This little programme expects exactly three arguments:
+  The layout update expects three arguments:
   
     1. Input Header File – a proper path to your C++ header file.
     2. Target Header File – a path to the header file where the output will be written. Mind that this file may get overwritten.
     3. Android NDK Sysroot Include Directory – the path to the include directory in your Android NDK sysroot.
+
+TypeInfo update:
+  Reads Inspector metadata and DO_TYPEINFO(name); declarations to update classes.json.
+  Keeps native aliases, the declaration header and assembly aliases unchanged.
+  RemappedTypes in remapping_config.json explicitly selects renamed dump types.
+  Missing, ambiguous and unsupported metadata is rejected before any file is written.
 
 Notes:
   - Wrap paths with spaces in quotes.
