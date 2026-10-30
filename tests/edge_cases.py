@@ -5,7 +5,8 @@
 The input preamble is the dump's IL2CPP internal types plus a few system types, and the target
 preamble is Core's header at UPDATE_COMMIT up to `namespace app {`, so both parse like the real files.
 Every case is also run a second time with its output as the target: the output must compile
-and reproduce itself. Cases are written to tests/.out/edge/<name>/. Paths come from tests/config.py.
+and reproduce itself. Cases are written to tests/.out/edge/<name>/. Paths come from tests/config.py. Set APIDIFF_WINSDK to an NDK sysroot include directory to
+exercise ARM64 parsing with the same fixtures.
 """
 import os
 import re
@@ -37,6 +38,9 @@ def dump_slices():
     return pre + "\n\n" + "\n\n".join(found[n] for n in wanted) + "\n"
 
 INPUT_PRE = dump_slices()
+if "Windows Kits" not in SDK:
+    # Preserve the fixture's alignment while using ARM64-compatible declaration syntax.
+    INPUT_PRE = re.sub(r"__declspec\(align\((\d+)\)\)", r"alignas(\1)", INPUT_PRE)
 CLASS_H = core_file("il2cpp-class.h", UPDATE_COMMIT)
 _t = core_file("il2cpp-types.h", UPDATE_COMMIT).decode("utf-8").replace("\r\n", "\n")
 TARGET_PRE = _t[:_t.index("namespace app {")]
@@ -129,6 +133,30 @@ case("field_same_count_reordered", input=FOO_IN + obj("H", ["struct Foo *b;", "i
 case("field_size_t_kept", input=obj("H", ["size_t s;", "int32_t a;"]),
      target="struct H : Il2CppObject {\n    size_t s;\n    int32_t a;\n};\n",
      S={"H": ["size_t s", "int32_t a"]})
+
+# Standard type headers must also work through the Windows SDK-only parse path.
+for name, includes in (
+    ("field_size_t_cstddef_first", "#include <cstddef>\n#include <cstdint>"),
+    ("field_size_t_cstddef_last", "#include <cstdint>\n#include <cstddef>"),
+    ("field_size_t_stddef", "#include <stddef.h>\n#include <cstdint>"),
+):
+    case(name, input=obj("H", ["size_t s;", "int32_t a;"]),
+         raw_target=TARGET_PRE.replace("#include <cstdint>", includes)
+         + "namespace app {\nstruct H : Il2CppObject {\n    size_t s;\n    int32_t a;\n};\n}\n",
+         S={"H": ["size_t s", "int32_t a"]}, hasnt=[r"(?m)^typedef .* __(?:u?int\d+|uintptr)_t;"])
+
+case("field_size_t_alias_declaration", input=obj("H", ["size_t s;", "int32_t a;"]),
+     raw_target=TARGET_PRE + "typedef size_t NativeSize;\nnamespace app {\n"
+     + "struct H : Il2CppObject {\n    size_t s;\n    int32_t a;\n};\n}\n",
+     S={"H": ["size_t s", "int32_t a"]}, has=[r"(?m)^typedef size_t NativeSize;"])
+case("field_size_t_existing_typedef", input=obj("H", ["size_t s;", "int32_t a;"]),
+     raw_target=TARGET_PRE + "typedef uint64_t size_t;\nnamespace app {\n"
+     + "struct H : Il2CppObject {\n    size_t s;\n    int32_t a;\n};\n}\n",
+     S={"H": ["size_t s", "int32_t a"]}, hasnt=[r"(?m)^typedef .* size_t;"])
+case("fail_size_t_conflicting_width", input=obj("H", ["size_t s;"]),
+     raw_target=TARGET_PRE.replace("#pragma once", "#pragma once\ntypedef unsigned int size_t;")
+     + "namespace app {\nstruct H : Il2CppObject {\n    size_t s;\n};\n}\n", fail=True,
+     log=[r"typedef redefinition with different types"])
 
 # --- base classes
 case("base_chain_child_own_fields", input=obj("Base", ["int32_t a;"]) + obj("Child", ["int32_t n;", "int32_t c;", "int32_t t;"], base="Base"),
@@ -307,10 +335,15 @@ def check(name, c):
     problems = []
     crashed = "baffled" in log
     if c.get("fail"):
+        if code == 0:
+            problems.append("failed parse returned success")
         if crashed:
             problems.append("crashed instead of failing cleanly")
         if out.replace("\r\n", "\n") != original:
             problems.append("target was modified")
+        for pattern in c.get("log", []):
+            if not re.search(pattern, log):
+                problems.append(f"log lacks /{pattern}/")
         return problems
     if crashed or "clang diagnostic push" not in out:
         problems.append("no output written" + (" (crashed: " + log.split("baffled.")[1].strip().split("\n")[0] + ")" if crashed else ""))
@@ -369,3 +402,4 @@ if __name__ == "__main__":
         for p in problems:
             print(f"        - {p}")
     print(f"\n{failed} failing of {len([n for n in CASES if not only or any(o in n for o in only)])}")
+    sys.exit(1 if failed else 0)

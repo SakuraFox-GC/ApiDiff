@@ -38,6 +38,7 @@ namespace ApiDiff
             if (!headerDiffer.BuildTypeModel())
             {
                 Log.Error("Failed to build type model.", null, nameof(headerDiffer.BuildTypeModel));
+                Environment.ExitCode = 1;
                 return;
             }
 

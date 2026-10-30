@@ -427,7 +427,8 @@ internal static class CppTypeExt
 
         public string ConstructDefinition()
         {
-            return $"typedef {typedef.ElementType.ConstructDefinition()} {typedef.Name}";
+            string elementType = typedef.ElementType is CppTypedef alias ? alias.Name : typedef.ElementType.ConstructDefinition();
+            return $"typedef {elementType} {typedef.Name}";
         }
     }
 

@@ -65,6 +65,27 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
         {
             var sysRootInclude = new DirectoryInfo(IncludeDir);
             cppParserOptions.SystemIncludeFolders.Add(Path.Combine(sysRootInclude.FullName, "c++", "v1"));
+            // NDK's standard headers use include_next to reach Clang's builtin headers.
+            if (sysRootInclude.Parent?.Parent?.Parent is { } toolchain)
+            {
+                var resources = new DirectoryInfo(Path.Combine(toolchain.FullName, "lib", "clang"));
+                if (resources.Exists)
+                {
+                    DirectoryInfo? builtins = resources.EnumerateDirectories()
+                        .OrderByDescending(directory => Version.TryParse(directory.Name.Contains('.') ? directory.Name : $"{directory.Name}.0", out Version? version) ? version : new Version())
+                        .Select(directory => new DirectoryInfo(Path.Combine(directory.FullName, "include")))
+                        .FirstOrDefault(directory => File.Exists(Path.Combine(directory.FullName, "stddef.h")));
+                    if (builtins is not null)
+                    {
+                        cppParserOptions.SystemIncludeFolders.Add(builtins.FullName);
+                    }
+                }
+            }
+            string targetIncludes = Path.Combine(sysRootInclude.FullName, "aarch64-linux-android");
+            if (Directory.Exists(targetIncludes))
+            {
+                cppParserOptions.SystemIncludeFolders.Add(targetIncludes);
+            }
             cppParserOptions.SystemIncludeFolders.Add(sysRootInclude.FullName);
         }
 
@@ -95,7 +116,7 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
             return false;
         }
 
-        _targetIncludes = [.. _targetCompilation.InclusionDirectives.Select(targetInclude => { return targetInclude.FileName; })];
+        _targetIncludes = [.. _targetCompilation.InclusionDirectives.Concat(_targetCompilation.System.InclusionDirectives).Select(targetInclude => targetInclude.FileName)];
         CppNamespace? appNamespace = _targetCompilation.Namespaces.FirstOrDefault(@namespace => @namespace.Name == "app");
         if (appNamespace is null)
         {
@@ -277,7 +298,7 @@ internal class Differ(string InputHeader, string TargetHeader, string IncludeDir
 
             globalDeclarations.Add(@class);
         }
-        globalDeclarations.InsertRange(0, _targetCompilation!.Typedefs.Where(def => !_targetIncludes.Contains(def.SourceFile) && def.Name != "size_t"));
+        globalDeclarations.InsertRange(0, _targetCompilation!.Typedefs.Where(def => !_targetIncludes.Contains(def.SourceFile) && def.Name != "size_t").DistinctBy(def => def.Name));
         foreach (CppType def in globalDeclarations)
         {
             headerBuilder.AppendLine($"{def.ConstructDefinition()};");
